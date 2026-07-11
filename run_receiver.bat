@@ -1,27 +1,29 @@
 @echo off
-REM ============================================================
-REM  Start the Sarthi Receiver (reads Outlook, processes dumps).
-REM  Keeps polling the inbox. Close this window to stop.
-REM  Put it in the app folder and double-click.
-REM ============================================================
 cd /d "%~dp0"
 
-where python >nul 2>nul
-if errorlevel 1 (
-  echo Python not found. Install from https://www.python.org/downloads/ (tick Add to PATH).
-  pause & exit /b 1
-)
+python --version >nul 2>&1
+if errorlevel 1 goto nopython
 
 if not exist "D:\Sarthi\multipart_buffer" mkdir "D:\Sarthi\multipart_buffer"
 
-REM Outlook automation needs pywin32
-python -c "import win32com.client" 2>nul
+python -c "import win32com.client" >nul 2>&1
 if errorlevel 1 (
-  echo First run - installing pywin32...
+  echo Installing pywin32 ...
   python -m pip install pywin32
 )
 
-echo Starting Sarthi Receiver (polling every 60s). Leave this window open.
+echo.
+echo Starting Sarthi Receiver - polling Outlook every 60 seconds.
+echo Leave this window open. Close it or press Ctrl+C to stop.
+echo.
 python sarthi_receiver.py --watch --interval 60
+goto end
 
+:nopython
+echo.
+echo Python was not found on PATH.
+echo Install it from https://www.python.org/downloads/ and tick "Add Python to PATH".
+echo.
+
+:end
 pause
