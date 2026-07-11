@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS dump_types (
     handler           TEXT,
     max_files         INTEGER,
     source            TEXT NOT NULL DEFAULT 'local',
+    origin            TEXT NOT NULL DEFAULT 'direct',
     recognition_json  TEXT NOT NULL DEFAULT '{"groups":[]}',
     updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -84,6 +85,7 @@ _MIGRATIONS = {
     "handler": "ALTER TABLE dump_types ADD COLUMN handler TEXT",
     "max_files": "ALTER TABLE dump_types ADD COLUMN max_files INTEGER",
     "source": "ALTER TABLE dump_types ADD COLUMN source TEXT DEFAULT 'local'",
+    "origin": "ALTER TABLE dump_types ADD COLUMN origin TEXT DEFAULT 'direct'",
     "recognition_json": "ALTER TABLE dump_types ADD COLUMN recognition_json TEXT DEFAULT '{\"groups\":[]}'",
 }
 
@@ -324,17 +326,23 @@ def get_dump_type(key, db_path: Path = DEFAULT_DB):
 
 
 def upsert_dump_type(key, name, enabled=1, sort_order=100, save_folder=None,
-                     handler=None, max_files=None, db_path: Path = DEFAULT_DB) -> None:
+                     handler=None, max_files=None, origin=None, db_path: Path = DEFAULT_DB) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
     with _conn(db_path) as c:
-        c.execute(
-            "INSERT INTO dump_types(key,name,enabled,sort_order,save_folder,handler,max_files,updated_at) "
-            "VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(key) DO UPDATE SET name=excluded.name, enabled=excluded.enabled, "
-            "sort_order=excluded.sort_order, save_folder=excluded.save_folder, "
-            "handler=COALESCE(excluded.handler, dump_types.handler), "
-            "max_files=COALESCE(excluded.max_files, dump_types.max_files), updated_at=excluded.updated_at",
-            (key, name, int(enabled), int(sort_order), save_folder or None,
-             handler or None, max_files, datetime.now().isoformat(timespec="seconds")))
+        exists = c.execute("SELECT 1 FROM dump_types WHERE key=?", (key,)).fetchone()
+        if exists:
+            c.execute(
+                "UPDATE dump_types SET name=?, enabled=?, sort_order=?, save_folder=?, "
+                "handler=COALESCE(?,handler), max_files=COALESCE(?,max_files), "
+                "origin=COALESCE(?,origin), updated_at=? WHERE key=?",
+                (name, int(enabled), int(sort_order), save_folder or None,
+                 handler or None, max_files, origin, now, key))
+        else:
+            c.execute(
+                "INSERT INTO dump_types(key,name,enabled,sort_order,save_folder,handler,"
+                "max_files,origin,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (key, name, int(enabled), int(sort_order), save_folder or None,
+                 handler or None, max_files, origin or "direct", now))
 
 
 def delete_dump_type(key, db_path: Path = DEFAULT_DB) -> None:
@@ -389,13 +397,13 @@ def sync_catalog(rows, db_path: Path = DEFAULT_DB) -> tuple:
             enabled = 1 if _truthy(r.get("active")) else 0
             if c.execute("SELECT 1 FROM dump_types WHERE key=?", (key,)).fetchone():
                 c.execute("UPDATE dump_types SET name=?, sort_order=COALESCE(?,sort_order), "
-                          "enabled=?, handler=?, max_files=?, source='neon', updated_at=? WHERE key=?",
+                          "enabled=?, handler=?, max_files=?, source='neon', origin='pmd', updated_at=? WHERE key=?",
                           (r.get("name") or key, r.get("sort_order"), enabled,
                            r.get("handler"), r.get("max_files"), now, key))
                 updated += 1
             else:
-                c.execute("INSERT INTO dump_types(key,name,enabled,sort_order,handler,max_files,source,updated_at) "
-                          "VALUES(?,?,?,?,?,?, 'neon', ?)",
+                c.execute("INSERT INTO dump_types(key,name,enabled,sort_order,handler,max_files,source,origin,updated_at) "
+                          "VALUES(?,?,?,?,?,?, 'neon', 'pmd', ?)",
                           (key, r.get("name") or key, enabled, r.get("sort_order") or 100,
                            r.get("handler"), r.get("max_files"), now))
                 created += 1
@@ -471,7 +479,8 @@ def seed_defaults(db_path: Path = DEFAULT_DB, force: bool = False) -> None:
         return
     for key, d in _SEED.items():
         upsert_dump_type(key, d["name"], enabled=1, sort_order=d["sort_order"],
-                         save_folder=d.get("save_folder"), handler=d.get("handler"), db_path=db_path)
+                         save_folder=d.get("save_folder"), handler=d.get("handler"),
+                         origin="pmd", db_path=db_path)
         set_recognition(key, d["recognition"], db_path=db_path)
         set_steps(key, d["steps"], db_path=db_path)
 

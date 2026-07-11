@@ -82,13 +82,84 @@ def _args_to_text(raw):
     return " ".join(parts)
 
 
+FIELD_LABELS = {"sender": "Sender", "subject": "Subject", "body": "Body",
+                "attachment": "Attachment name", "anywhere": "Anywhere (subject+body)"}
+OP_LABELS = {"is": "is", "is_one_of": "is one of", "contains": "contains",
+             "equals": "equals", "matches": "matches (regex)"}
+
+
+def recognition_builder(key):
+    """Render the form-based recognition editor for a dump type (mutates ss.groups)."""
+    if ss.rec_key != key:
+        ss.groups = df.get_recognition(key, DB_PATH) or []
+        ss.rec_key = key
+    fields = list(FIELD_LABELS.keys())
+
+    if not ss.groups:
+        st.caption("No conditions yet.")
+
+    for gi, g in enumerate(ss.groups):
+        with st.container(border=True):
+            m1, m2 = st.columns([3, 1])
+            g["mode"] = m1.radio(
+                f"Match when … (group {gi + 1})", ["all", "any"],
+                index=0 if (g.get("mode", "all") == "all") else 1, horizontal=True,
+                format_func=lambda x: "ALL of these are true" if x == "all" else "ANY of these are true",
+                key=f"mode_{key}_{gi}")
+            if m2.button("Remove group", key=f"delg_{key}_{gi}"):
+                ss.groups.pop(gi); st.rerun()
+
+            for ci, cond in enumerate(g.get("conditions", [])):
+                f, o, v, x = st.columns([2, 2, 4, 1])
+                fld = f.selectbox("Field", fields, index=fields.index(cond.get("field", "anywhere")),
+                                  format_func=lambda k: FIELD_LABELS[k],
+                                  key=f"f_{key}_{gi}_{ci}", label_visibility="collapsed")
+                cond["field"] = fld
+                ops = df.OPS_SENDER if fld == "sender" else df.OPS_TEXT
+                cur_op = cond.get("op", ops[0])
+                if cur_op not in ops:
+                    cur_op = ops[0]
+                op = o.selectbox("Op", ops, index=ops.index(cur_op),
+                                 format_func=lambda x: OP_LABELS[x],
+                                 key=f"o_{key}_{gi}_{ci}", label_visibility="collapsed")
+                cond["op"] = op
+                if op == "is_one_of":
+                    val = v.text_input("Values", value=", ".join(cond.get("values", [])),
+                                       placeholder="a@bigul.co, b@bigul.co",
+                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
+                    cond["values"] = [s.strip() for s in val.split(",") if s.strip()]
+                    cond.pop("value", None)
+                else:
+                    val = v.text_input("Value", value=cond.get("value", ""),
+                                       placeholder="e.g. order file",
+                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
+                    cond["value"] = val
+                    cond.pop("values", None)
+                if x.button("✕", key=f"delc_{key}_{gi}_{ci}"):
+                    g["conditions"].pop(ci); st.rerun()
+
+            if st.button("+ Add condition", key=f"addc_{key}_{gi}"):
+                g.setdefault("conditions", []).append(
+                    {"field": "subject", "op": "contains", "value": ""})
+                st.rerun()
+
+    ga, gb = st.columns([1, 4])
+    if ga.button("+ Add rule group", key=f"addg_{key}"):
+        ss.groups.append({"mode": "all", "conditions": [
+            {"field": "subject", "op": "contains", "value": ""}]})
+        st.rerun()
+    if gb.button("Save identifier", type="primary", key=f"saverec_{key}"):
+        df.set_recognition(key, ss.groups, DB_PATH)
+        st.success("Saved.")
+
+
 # ===========================================================================
 # SIDEBAR
 # ===========================================================================
 with st.sidebar:
     st.markdown("### ◈ Dump Processor")
     st.caption("Sarthi · receiver")
-    NAV = ["Overview", "Dump types", "Run history", "Neon catalog"]
+    NAV = ["Overview", "Dump types", "Run history", "Neon catalog", "Settings"]
     # Configure is a sub-screen of "Dump types" — keep the nav on that while editing
     current_nav = "Dump types" if ss.screen == "Configure" else (
         ss.screen if ss.screen in NAV else "Overview")
@@ -180,6 +251,9 @@ elif ss.screen == "Dump types":
                            unsafe_allow_html=True)
                 b.markdown(f"<span class='pill {'on' if t['enabled'] else 'off'}'>"
                            f"{'Active' if t['enabled'] else 'Off'}</span>", unsafe_allow_html=True)
+                origin = t.get("origin", "direct")
+                b.markdown(f"<span class='pill {'neon' if origin == 'pmd' else 'off'}'>"
+                           f"{'PMD' if origin == 'pmd' else 'Direct'}</span>", unsafe_allow_html=True)
                 steps = df.get_steps(t["key"], DB_PATH)
                 st.markdown(f"<span class='mono'>saves to {t['save_folder'] or '(not set)'}</span>",
                             unsafe_allow_html=True)
@@ -224,6 +298,15 @@ elif ss.screen == "Configure":
     folder_in = st.text_input("Save folder — the dump is copied here before anything runs",
                               value="" if is_new else (t["save_folder"] or ""),
                               placeholder=r"e.g. D:\Sarthi\Orders")
+    st.caption("Incoming .zip is unzipped here; .csv/.xlsx are saved as-is. Scripts read the "
+               "extracted data file via {assembled_path}.")
+
+    origin_cur = t.get("origin", "direct") if not is_new else "direct"
+    origin_in = st.radio(
+        "Comes from", ["pmd", "direct"],
+        index=0 if origin_cur == "pmd" else 1, horizontal=True,
+        format_func=lambda x: "Plan My Day — fixed format, matched by label"
+        if x == "pmd" else "Direct email — other system, matched by an identifier you set")
 
     if is_new:
         if st.button("Create dump type", type="primary"):
@@ -234,7 +317,8 @@ elif ss.screen == "Configure":
                 st.error("That key already exists.")
             else:
                 df.upsert_dump_type(k, name_in.strip() or k, int(enabled_in), int(order_in),
-                                    save_folder=folder_in.strip() or None, db_path=DB_PATH)
+                                    save_folder=folder_in.strip() or None, origin=origin_in,
+                                    db_path=DB_PATH)
                 goto("Configure", sel=k); st.rerun()
         st.stop()
 
@@ -242,95 +326,36 @@ elif ss.screen == "Configure":
     hb1, hb2 = st.columns([1, 4])
     if hb1.button("Save details", type="primary"):
         df.upsert_dump_type(key, name_in.strip() or key, int(enabled_in), int(order_in),
-                            save_folder=folder_in.strip() or None, db_path=DB_PATH)
+                            save_folder=folder_in.strip() or None, origin=origin_in, db_path=DB_PATH)
         st.success("Saved.")
     if hb2.button("Delete this dump type"):
         df.delete_dump_type(key, DB_PATH); goto("Dump types"); st.rerun()
 
     st.divider()
 
-    # ---- 1. RECOGNITION (form-based) --------------------------------------
+    # ---- 1. RECOGNITION ---------------------------------------------------
     st.subheader("① How it's recognized")
-    st.caption("Match on who sent it, the subject, the body, or a combination. "
-               "If the email carries a machine label from Plan My Day, that routes it automatically "
-               "and these become the backup.")
-
-    if ss.rec_key != key:               # (re)load this type's rules into the editor
-        ss.groups = df.get_recognition(key, DB_PATH) or []
-        ss.rec_key = key
-
-    FIELD_LABELS = {"sender": "Sender", "subject": "Subject", "body": "Body",
-                    "attachment": "Attachment name", "anywhere": "Anywhere (subject+body)"}
-    fields = list(FIELD_LABELS.keys())
-
-    if not ss.groups:
-        st.info("No conditions yet — this type won't be auto-recognized until you add one "
-                "(a stamped label from PMD would still route it).")
-
-    for gi, g in enumerate(ss.groups):
-        with st.container(border=True):
-            m1, m2 = st.columns([3, 1])
-            mode = m1.radio(f"Match when … (group {gi + 1})",
-                            ["all", "any"],
-                            index=0 if (g.get("mode", "all") == "all") else 1,
-                            horizontal=True,
-                            format_func=lambda x: "ALL of these are true" if x == "all" else "ANY of these are true",
-                            key=f"mode_{key}_{gi}")
-            g["mode"] = mode
-            if m2.button("Remove group", key=f"delg_{key}_{gi}"):
-                ss.groups.pop(gi); st.rerun()
-
-            for ci, cond in enumerate(g.get("conditions", [])):
-                f, o, v, x = st.columns([2, 2, 4, 1])
-                fld = f.selectbox("Field", fields, index=fields.index(cond.get("field", "anywhere")),
-                                  format_func=lambda k: FIELD_LABELS[k],
-                                  key=f"f_{key}_{gi}_{ci}", label_visibility="collapsed")
-                cond["field"] = fld
-                ops = df.OPS_SENDER if fld == "sender" else df.OPS_TEXT
-                cur_op = cond.get("op", ops[0])
-                if cur_op not in ops:
-                    cur_op = ops[0]
-                op = o.selectbox("Op", ops, index=ops.index(cur_op),
-                                 format_func=lambda x: {"is": "is", "is_one_of": "is one of",
-                                                        "contains": "contains", "equals": "equals",
-                                                        "matches": "matches (regex)"}[x],
-                                 key=f"o_{key}_{gi}_{ci}", label_visibility="collapsed")
-                cond["op"] = op
-                if op == "is_one_of":
-                    val = v.text_input("Values", value=", ".join(cond.get("values", [])),
-                                       placeholder="a@bigul.co, b@bigul.co",
-                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
-                    cond["values"] = [s.strip() for s in val.split(",") if s.strip()]
-                    cond.pop("value", None)
-                else:
-                    val = v.text_input("Value", value=cond.get("value", ""),
-                                       placeholder="e.g. order file",
-                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
-                    cond["value"] = val
-                    cond.pop("values", None)
-                if x.button("✕", key=f"delc_{key}_{gi}_{ci}"):
-                    g["conditions"].pop(ci); st.rerun()
-
-            if st.button("+ Add condition", key=f"addc_{key}_{gi}"):
-                g.setdefault("conditions", []).append(
-                    {"field": "subject", "op": "contains", "value": ""})
-                st.rerun()
-
-    ga, gb = st.columns([1, 4])
-    if ga.button("+ Add rule group"):
-        ss.groups.append({"mode": "all", "conditions": [
-            {"field": "subject", "op": "contains", "value": ""}]})
-        st.rerun()
-    if gb.button("Save recognition", type="primary"):
-        df.set_recognition(key, ss.groups, DB_PATH)
-        st.success("Recognition saved.")
+    if origin_in == "pmd":
+        st.info(f"Comes from **Plan My Day** in the fixed format, so it's recognized "
+                f"automatically by its label — **handler `{t.get('handler') or key}`**. "
+                "The sender can be anyone; you don't need sender/subject rules here.")
+        with st.expander("Add backup keyword rules (optional)"):
+            st.caption("Only used if the label is ever missing. Most PMD dumps never need this.")
+            recognition_builder(key)
+    else:
+        st.caption("This email doesn't come from PMD, so set an identifier — match on who "
+                   "sent it, the subject, the body, or a combination. Add rule groups for "
+                   "\"(sender A AND subject X) OR (sender B AND subject Y)\".")
+        recognition_builder(key)
 
     st.divider()
 
     # ---- 2. SAVE FOLDER already above; ---- 3. STEPS ----------------------
     st.subheader("② What runs, in order")
-    st.caption("Each step runs after the one above. If a “stop” step fails, the rest don't run. "
-               "In arguments, use {assembled_path} for the saved file, plus {subject}, {sender_email}, {batch_id}.")
+    st.caption("The dump is first extracted into the save folder — a .zip is unzipped, "
+               "a .csv/.xlsx is placed as-is. Each step then runs after the one above; a "
+               "“stop” step that fails halts the rest. In arguments, {assembled_path} is the "
+               "extracted data file, {extract_dir} is the folder, plus {subject}, {sender_email}, {batch_id}.")
 
     if ss.steps_key != key:
         rows = df.get_steps(key, DB_PATH)
@@ -441,3 +466,71 @@ elif ss.screen == "Neon catalog":
         if missing:
             st.warning("Active in the catalog but no steps yet (won't run until configured): "
                        + ", ".join(missing))
+
+# ===========================================================================
+# SETTINGS  (GitHub update)
+# ===========================================================================
+elif ss.screen == "Settings":
+    import subprocess
+    REPO = "https://github.com/vikssamsung-coder/Sarthireceiver.git"
+    appdir = Path(__file__).resolve().parent
+
+    st.title("Settings")
+    st.caption(f"App folder: {appdir}")
+
+    def _git(*args, timeout=90):
+        try:
+            return subprocess.run(["git", "-C", str(appdir), *args],
+                                  capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError:
+            return None
+        except Exception as e:
+            r = subprocess.CompletedProcess(args, 1, "", str(e))
+            return r
+
+    st.subheader("Version & GitHub")
+    st.markdown(f"**Repo:** {REPO}")
+
+    probe = _git("rev-parse", "--is-inside-work-tree")
+    if probe is None:
+        st.error("Git isn't installed on this machine. Install it from "
+                 "https://git-scm.com/download/win, then reload this page.")
+        st.stop()
+
+    is_repo = probe.returncode == 0 and (appdir / ".git").exists()
+    if is_repo:
+        head = _git("rev-parse", "--short", "HEAD")
+        msg = _git("log", "-1", "--pretty=%s")
+        st.info(f"Current version: **{(head.stdout or '?').strip()}** — "
+                f"{(msg.stdout or '').strip()}")
+    else:
+        st.warning("This folder isn't linked to GitHub yet. The first update will link it.")
+
+    st.subheader("Update from GitHub")
+    st.caption("Pulls the latest code from the repo. After it finishes, restart the app so the "
+               "new code loads: press Ctrl+C in the Streamlit terminal, then run "
+               "`streamlit run app.py` again.")
+
+    if st.button("Update now", type="primary"):
+        with st.spinner("Updating from GitHub…"):
+            if not is_repo:
+                _git("init")
+                _git("remote", "remove", "origin")
+                _git("remote", "add", "origin", REPO)
+                _git("fetch", "origin")
+                out = _git("checkout", "-f", "main")
+            else:
+                out = _git("pull", "origin", "main")
+        text = ((out.stdout or "") + (out.stderr or "")).strip() if out else "git not found"
+        st.code(text or "(no output)")
+        if out and out.returncode == 0:
+            st.success("Updated. Now restart the app (Ctrl+C in the terminal, then "
+                       "`streamlit run app.py`) to load the new code.")
+        else:
+            st.error("Update failed — see the output above. Check that the repo is reachable "
+                     "and that this folder is allowed to pull from it.")
+
+    st.divider()
+    st.subheader("Database")
+    st.caption(f"Registry: {DB_PATH}")
+    st.caption("Neon URL is read from D:\\PMD-Desktop-main\\.streamlit\\secrets.toml.")

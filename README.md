@@ -33,10 +33,24 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
 |---|---|
 | `app.py` | the Streamlit app (the four screens). |
 | `dump_flows.py` | registry: recognition + `resolve`, steps, folders, confirmations, catalog. |
+| `extract.py` | auto-detects zip/csv/xlsx: unzips or places the dump into the folder. |
 | `neon_sync.py` | reads the Neon URL from `secrets.toml` and syncs the catalog. |
-| `flow_engine.py` | runs one dump end to end (save → sequence → confirm). |
+| `flow_engine.py` | runs one dump end to end (extract → sequence → confirm). |
 | `processor_integration.py` | the one-import + two-swap wiring into `email_processor.py`. |
 | `test_app.py` | logic tests (recognition, resolve, args, secrets, end-to-end). |
+
+## The dump can be zip, csv or xlsx
+
+Before any step runs, the dump is normalised into the save folder by `extract.py`:
+
+- **.zip** → unzipped into the folder (flattened; path-traversal is blocked).
+- **.csv / .xlsx** → placed as-is (a real .xlsx is itself a zip, so it's *never*
+  wrongly exploded — detection is by extension first).
+
+The scripts then read the **extracted data file**, which the flow passes as
+`{assembled_path}`. `{extract_dir}` is the folder. If a zip holds several files,
+`{assembled_path}` points at the first csv/xlsx; all files are available in
+`{extract_dir}` for a script that globs.
 
 ## Install & run (Sarthi box)
 
