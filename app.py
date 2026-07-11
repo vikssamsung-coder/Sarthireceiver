@@ -468,67 +468,34 @@ elif ss.screen == "Neon catalog":
                        + ", ".join(missing))
 
 # ===========================================================================
-# SETTINGS  (GitHub update)
+# SETTINGS  (HTTPS update — no git, like PMD)
 # ===========================================================================
 elif ss.screen == "Settings":
-    import subprocess
-    REPO = "https://github.com/vikssamsung-coder/Sarthireceiver.git"
+    REPO = "https://github.com/vikssamsung-coder/Sarthireceiver"
     appdir = Path(__file__).resolve().parent
 
     st.title("Settings")
     st.caption(f"App folder: {appdir}")
 
-    def _git(*args, timeout=90):
-        try:
-            return subprocess.run(["git", "-C", str(appdir), *args],
-                                  capture_output=True, text=True, timeout=timeout)
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            r = subprocess.CompletedProcess(args, 1, "", str(e))
-            return r
-
-    st.subheader("Version & GitHub")
-    st.markdown(f"**Repo:** {REPO}")
-
-    probe = _git("rev-parse", "--is-inside-work-tree")
-    if probe is None:
-        st.error("Git isn't installed on this machine. Install it from "
-                 "https://git-scm.com/download/win, then reload this page.")
-        st.stop()
-
-    is_repo = probe.returncode == 0 and (appdir / ".git").exists()
-    if is_repo:
-        head = _git("rev-parse", "--short", "HEAD")
-        msg = _git("log", "-1", "--pretty=%s")
-        st.info(f"Current version: **{(head.stdout or '?').strip()}** — "
-                f"{(msg.stdout or '').strip()}")
-    else:
-        st.warning("This folder isn't linked to GitHub yet. The first update will link it.")
-
     st.subheader("Update from GitHub")
-    st.caption("Pulls the latest code from the repo. After it finishes, restart the app so the "
-               "new code loads: press Ctrl+C in the Streamlit terminal, then run "
-               "`streamlit run app.py` again.")
+    st.markdown(f"**Repo:** {REPO}")
+    st.caption("Downloads the latest code over HTTPS — no git, no install (the same way "
+               "PMD updates itself). Your database and secrets are left untouched. After it "
+               "finishes, restart the app so the new code loads: Ctrl+C in the terminal, then "
+               "`run_app.bat` (or `streamlit run app.py`).")
 
     if st.button("Update now", type="primary"):
-        with st.spinner("Updating from GitHub…"):
-            if not is_repo:
-                _git("init")
-                _git("remote", "remove", "origin")
-                _git("remote", "add", "origin", REPO)
-                _git("fetch", "origin")
-                out = _git("checkout", "-f", "main")
-            else:
-                out = _git("pull", "origin", "main")
-        text = ((out.stdout or "") + (out.stderr or "")).strip() if out else "git not found"
-        st.code(text or "(no output)")
-        if out and out.returncode == 0:
-            st.success("Updated. Now restart the app (Ctrl+C in the terminal, then "
-                       "`streamlit run app.py`) to load the new code.")
-        else:
-            st.error("Update failed — see the output above. Check that the repo is reachable "
-                     "and that this folder is allowed to pull from it.")
+        import updater
+        with st.spinner("Downloading latest from GitHub…"):
+            try:
+                files = updater.update_from_github(str(appdir), log=lambda m: None)
+                st.success(f"Updated {len(files)} file(s). Now restart the app to load the new code.")
+                with st.expander("Files updated"):
+                    for f in sorted(files):
+                        st.write("•", f)
+            except Exception as e:
+                st.error(f"Update failed: {e}\n\nCheck the internet connection and that the "
+                         "repo is reachable. Private repo? Put a GitHub token in secrets.toml.")
 
     st.divider()
     st.subheader("Database")

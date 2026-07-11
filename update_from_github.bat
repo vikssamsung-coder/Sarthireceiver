@@ -1,32 +1,22 @@
 @echo off
 REM ============================================================
-REM  Update the Sarthi Dump Processor from GitHub on this box.
-REM  Run from the app folder. Does the same thing as the app's
-REM  Settings -> Update button.
+REM  Update the Sarthi Dump Processor from GitHub (no git needed).
+REM  Downloads the latest code over HTTPS, same as PMD.
 REM ============================================================
-setlocal
 cd /d "%~dp0"
 
-where git >nul 2>nul
+where python >nul 2>nul
 if errorlevel 1 (
-  echo Git is not installed. Get it from https://git-scm.com/download/win
+  echo Python not found. Install from https://www.python.org/downloads/ (tick Add to PATH).
   pause & exit /b 1
 )
 
-if not exist ".git" (
-  echo First-time setup: linking this folder to GitHub...
-  git init
-  git remote add origin https://github.com/vikssamsung-coder/Sarthireceiver.git
-  git fetch origin
-  git checkout -f main
-) else (
-  git pull origin main
-)
+python updater.py "%~dp0."
 
 echo.
 echo ============================================================
 echo Update complete. Restart the app so the new code loads:
-echo   1) press Ctrl+C in the Streamlit window
-echo   2) run:  streamlit run app.py
+echo   1) close/Ctrl+C the app or receiver window
+echo   2) run run_app.bat  (or run_receiver.bat)
 echo ============================================================
 pause
