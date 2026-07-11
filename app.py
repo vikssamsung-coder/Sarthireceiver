@@ -1,0 +1,443 @@
+# -*- coding: utf-8 -*-
+r"""
+Sarthi Dump Processor — management app (rebuilt to the approved design).
+
+Screens: Overview · Dump types · Configure a type · Run history · Neon catalog.
+Recognition is form-based (sender / subject / body / attachment / anywhere),
+All-or-Any per group, multiple groups OR'd. Neon URL is read from secrets.toml.
+
+Run on the Sarthi box:
+    streamlit run app.py
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+import dump_flows as df
+import flow_engine
+import neon_sync
+
+DB_PATH = Path(r"D:\Sarthi\multipart_buffer\dump_flows.sqlite3")
+
+st.set_page_config(page_title="Sarthi Dump Processor", layout="wide")
+df.init_db(DB_PATH)
+
+# ---- light styling to match the design ------------------------------------
+st.markdown("""
+<style>
+ .block-container{padding-top:2.2rem;max-width:1080px}
+ h1,h2,h3{font-family:'Space Grotesk',system-ui,sans-serif}
+ .rail{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 4px}
+ .stn{flex:1;min-width:150px;background:#F6F8FB;border:1px solid #E1E7F0;border-radius:11px;padding:13px 14px}
+ .stn .n{width:22px;height:22px;border-radius:7px;background:#38499E;color:#fff;font-weight:600;
+   display:inline-grid;place-items:center;font-size:12px;margin-bottom:8px}
+ .stn .c{font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#8A94A3;font-weight:600}
+ .stn .t{font-size:13px;font-weight:600;color:#161B24;margin-top:2px}
+ .pill{font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px}
+ .ok{background:#E1F1E9;color:#1F8C5C}.fail{background:#F8E4E2;color:#C0433D}
+ .on{background:#E1F1E9;color:#1F8C5C}.off{background:#EEF1F5;color:#8A94A3}
+ .neon{background:#E9ECF7;color:#2B3878}
+ .mono{font-family:'IBM Plex Mono',monospace;font-size:12px;color:#5C6675}
+ div[data-testid="stVerticalBlockBorderWrapper"]{border-radius:12px}
+</style>
+""", unsafe_allow_html=True)
+
+# ---- session ---------------------------------------------------------------
+ss = st.session_state
+ss.setdefault("screen", "Overview")
+ss.setdefault("sel", None)          # selected dump type key (for Configure)
+ss.setdefault("rec_key", None)      # which type's recognition is loaded
+ss.setdefault("groups", [])         # recognition groups being edited
+ss.setdefault("steps_key", None)
+ss.setdefault("steps", [])
+
+
+def goto(screen, sel=None):
+    ss.screen = screen
+    if sel is not None:
+        ss.sel = sel
+
+
+def _args_to_text(raw):
+    """Turn stored args_json (JSON list of {flag,value,optional} OR a template
+    string) into a friendly one-line arguments string for editing."""
+    try:
+        spec = json.loads(raw or "[]")
+    except Exception:
+        return raw or ""
+    if isinstance(spec, str):
+        return spec
+    parts = []
+    for item in spec:
+        flag = (item.get("flag") or "").strip()
+        val = item.get("value")
+        if flag:
+            parts.append(flag)
+        if val is not None and str(val) != "":
+            parts.append(str(val))
+    return " ".join(parts)
+
+
+# ===========================================================================
+# SIDEBAR
+# ===========================================================================
+with st.sidebar:
+    st.markdown("### ◈ Dump Processor")
+    st.caption("Sarthi · receiver")
+    NAV = ["Overview", "Dump types", "Run history", "Neon catalog"]
+    # Configure is a sub-screen of "Dump types" — keep the nav on that while editing
+    current_nav = "Dump types" if ss.screen == "Configure" else (
+        ss.screen if ss.screen in NAV else "Overview")
+    nav = st.radio("Go to", NAV, index=NAV.index(current_nav),
+                   label_visibility="collapsed")
+    if nav != current_nav:
+        ss.screen = nav
+
+    st.divider()
+    url = neon_sync.load_neon_url()
+    if url:
+        st.markdown('<span class="pill on">● Neon connected</span>', unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="pill off">● Neon URL not found</span>', unsafe_allow_html=True)
+    st.caption("Reads DB URL from\n`.streamlit/secrets.toml`")
+    if st.button("Sync from Neon", use_container_width=True):
+        res = neon_sync.sync(DB_PATH, url or None)
+        if res.get("error"):
+            st.error(res["error"])
+        else:
+            st.success(f"{res['total']} types · {res['created']} new, {res['updated']} updated")
+
+types = df.list_dump_types(DB_PATH)
+
+
+def type_row(key):
+    return next((t for t in types if t["key"] == key), None)
+
+
+# ===========================================================================
+# OVERVIEW
+# ===========================================================================
+if ss.screen == "Overview":
+    st.title("Overview")
+    st.caption("What happens when a dump email arrives, and what ran recently.")
+    st.markdown("""
+    <div class="rail">
+      <div class="stn"><div class="n">1</div><div class="c">Recognize</div><div class="t">Which dump is it?</div></div>
+      <div class="stn"><div class="n">2</div><div class="c">Save</div><div class="t">Put the file in its folder</div></div>
+      <div class="stn"><div class="n">3</div><div class="c">Run</div><div class="t">Run its scripts, in order</div></div>
+      <div class="stn"><div class="n">4</div><div class="c">Record</div><div class="t">Save the result here</div></div>
+    </div>""", unsafe_allow_html=True)
+
+    runs = df.list_runs(limit=200, db_path=DB_PATH)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Dump types", len(types))
+    c2.metric("Runs recorded", len(runs))
+    c3.metric("Succeeded", sum(1 for r in runs if r["status"] == "success"))
+    c4.metric("Failed", sum(1 for r in runs if r["status"] == "failed"))
+
+    st.subheader("Latest runs")
+    if not runs:
+        st.info("No runs yet. Once the processor handles a dump, it shows up here.")
+    else:
+        rows = []
+        for r in runs[:15]:
+            sr = json.loads(r["steps_json"] or "[]")
+            rows.append({"when": r["finished_at"], "dump type": r["dump_type"],
+                         "batch": r["batch_id"],
+                         "steps": ", ".join(f"{x['step']}:{x['status']}" for x in sr) or "—",
+                         "result": r["status"]})
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# DUMP TYPES (cards)
+# ===========================================================================
+elif ss.screen == "Dump types":
+    tc, tb = st.columns([3, 1])
+    tc.title("Dump types")
+    tc.caption("How each dump is recognized, where its file goes, and what runs.")
+    with tb:
+        st.write("")
+        if st.button("➕ New dump type", use_container_width=True):
+            goto("Configure", sel="__new__")
+            st.rerun()
+
+    if not types:
+        st.info("No dump types yet. Add one, or sync the catalog from Neon in the sidebar.")
+        if st.button("Seed current 3 flows"):
+            df.seed_defaults(DB_PATH, force=True)
+            st.rerun()
+
+    cols = st.columns(2)
+    for i, t in enumerate(types):
+        with cols[i % 2]:
+            with st.container(border=True):
+                a, b = st.columns([3, 1])
+                a.markdown(f"**{t['name']}**  \n<span class='mono'>{t['key']}</span>",
+                           unsafe_allow_html=True)
+                b.markdown(f"<span class='pill {'on' if t['enabled'] else 'off'}'>"
+                           f"{'Active' if t['enabled'] else 'Off'}</span>", unsafe_allow_html=True)
+                steps = df.get_steps(t["key"], DB_PATH)
+                st.markdown(f"<span class='mono'>saves to {t['save_folder'] or '(not set)'}</span>",
+                            unsafe_allow_html=True)
+                if steps:
+                    st.markdown(" ".join(
+                        f"<span class='pill neon'>{s['step_name']}</span>" for s in steps),
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown("<span class='pill off'>no steps yet</span>", unsafe_allow_html=True)
+                if st.button("Open", key=f"open_{t['key']}", use_container_width=True):
+                    goto("Configure", sel=t["key"])
+                    st.rerun()
+
+# ===========================================================================
+# CONFIGURE a dump type
+# ===========================================================================
+elif ss.screen == "Configure":
+    if st.button("← All dump types"):
+        goto("Dump types"); st.rerun()
+
+    is_new = ss.sel == "__new__"
+    t = None if is_new else type_row(ss.sel)
+    if not is_new and not t:
+        st.warning("That dump type no longer exists.")
+        st.stop()
+
+    # header form
+    st.title("New dump type" if is_new else t["name"])
+    if not is_new and (t.get("source") == "neon"):
+        st.markdown(f"<span class='pill neon'>from Neon catalog</span> &nbsp; "
+                    f"handler <span class='mono'>{t.get('handler') or t['key']}</span> · "
+                    f"up to {t.get('max_files') if t.get('max_files') is not None else '—'} files",
+                    unsafe_allow_html=True)
+
+    h1, h2, h3 = st.columns([2, 1, 1])
+    key_in = h1.text_input("Key (short id)", value="" if is_new else t["key"],
+                           disabled=not is_new, help="lowercase, no spaces, e.g. order")
+    name_in = h1.text_input("Name", value="" if is_new else (t["name"] or ""))
+    enabled_in = h2.toggle("Active", value=True if is_new else bool(t["enabled"]))
+    order_in = h3.number_input("Detect order", value=100 if is_new else int(t["sort_order"]),
+                               step=10, help="Lower is checked first. Specific types before broad ones.")
+    folder_in = st.text_input("Save folder — the dump is copied here before anything runs",
+                              value="" if is_new else (t["save_folder"] or ""),
+                              placeholder=r"e.g. D:\Sarthi\Orders")
+
+    if is_new:
+        if st.button("Create dump type", type="primary"):
+            k = key_in.strip().lower().replace(" ", "_")
+            if not k:
+                st.error("Give it a key.")
+            elif type_row(k):
+                st.error("That key already exists.")
+            else:
+                df.upsert_dump_type(k, name_in.strip() or k, int(enabled_in), int(order_in),
+                                    save_folder=folder_in.strip() or None, db_path=DB_PATH)
+                goto("Configure", sel=k); st.rerun()
+        st.stop()
+
+    key = t["key"]
+    hb1, hb2 = st.columns([1, 4])
+    if hb1.button("Save details", type="primary"):
+        df.upsert_dump_type(key, name_in.strip() or key, int(enabled_in), int(order_in),
+                            save_folder=folder_in.strip() or None, db_path=DB_PATH)
+        st.success("Saved.")
+    if hb2.button("Delete this dump type"):
+        df.delete_dump_type(key, DB_PATH); goto("Dump types"); st.rerun()
+
+    st.divider()
+
+    # ---- 1. RECOGNITION (form-based) --------------------------------------
+    st.subheader("① How it's recognized")
+    st.caption("Match on who sent it, the subject, the body, or a combination. "
+               "If the email carries a machine label from Plan My Day, that routes it automatically "
+               "and these become the backup.")
+
+    if ss.rec_key != key:               # (re)load this type's rules into the editor
+        ss.groups = df.get_recognition(key, DB_PATH) or []
+        ss.rec_key = key
+
+    FIELD_LABELS = {"sender": "Sender", "subject": "Subject", "body": "Body",
+                    "attachment": "Attachment name", "anywhere": "Anywhere (subject+body)"}
+    fields = list(FIELD_LABELS.keys())
+
+    if not ss.groups:
+        st.info("No conditions yet — this type won't be auto-recognized until you add one "
+                "(a stamped label from PMD would still route it).")
+
+    for gi, g in enumerate(ss.groups):
+        with st.container(border=True):
+            m1, m2 = st.columns([3, 1])
+            mode = m1.radio(f"Match when … (group {gi + 1})",
+                            ["all", "any"],
+                            index=0 if (g.get("mode", "all") == "all") else 1,
+                            horizontal=True,
+                            format_func=lambda x: "ALL of these are true" if x == "all" else "ANY of these are true",
+                            key=f"mode_{key}_{gi}")
+            g["mode"] = mode
+            if m2.button("Remove group", key=f"delg_{key}_{gi}"):
+                ss.groups.pop(gi); st.rerun()
+
+            for ci, cond in enumerate(g.get("conditions", [])):
+                f, o, v, x = st.columns([2, 2, 4, 1])
+                fld = f.selectbox("Field", fields, index=fields.index(cond.get("field", "anywhere")),
+                                  format_func=lambda k: FIELD_LABELS[k],
+                                  key=f"f_{key}_{gi}_{ci}", label_visibility="collapsed")
+                cond["field"] = fld
+                ops = df.OPS_SENDER if fld == "sender" else df.OPS_TEXT
+                cur_op = cond.get("op", ops[0])
+                if cur_op not in ops:
+                    cur_op = ops[0]
+                op = o.selectbox("Op", ops, index=ops.index(cur_op),
+                                 format_func=lambda x: {"is": "is", "is_one_of": "is one of",
+                                                        "contains": "contains", "equals": "equals",
+                                                        "matches": "matches (regex)"}[x],
+                                 key=f"o_{key}_{gi}_{ci}", label_visibility="collapsed")
+                cond["op"] = op
+                if op == "is_one_of":
+                    val = v.text_input("Values", value=", ".join(cond.get("values", [])),
+                                       placeholder="a@bigul.co, b@bigul.co",
+                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
+                    cond["values"] = [s.strip() for s in val.split(",") if s.strip()]
+                    cond.pop("value", None)
+                else:
+                    val = v.text_input("Value", value=cond.get("value", ""),
+                                       placeholder="e.g. order file",
+                                       key=f"v_{key}_{gi}_{ci}", label_visibility="collapsed")
+                    cond["value"] = val
+                    cond.pop("values", None)
+                if x.button("✕", key=f"delc_{key}_{gi}_{ci}"):
+                    g["conditions"].pop(ci); st.rerun()
+
+            if st.button("+ Add condition", key=f"addc_{key}_{gi}"):
+                g.setdefault("conditions", []).append(
+                    {"field": "subject", "op": "contains", "value": ""})
+                st.rerun()
+
+    ga, gb = st.columns([1, 4])
+    if ga.button("+ Add rule group"):
+        ss.groups.append({"mode": "all", "conditions": [
+            {"field": "subject", "op": "contains", "value": ""}]})
+        st.rerun()
+    if gb.button("Save recognition", type="primary"):
+        df.set_recognition(key, ss.groups, DB_PATH)
+        st.success("Recognition saved.")
+
+    st.divider()
+
+    # ---- 2. SAVE FOLDER already above; ---- 3. STEPS ----------------------
+    st.subheader("② What runs, in order")
+    st.caption("Each step runs after the one above. If a “stop” step fails, the rest don't run. "
+               "In arguments, use {assembled_path} for the saved file, plus {subject}, {sender_email}, {batch_id}.")
+
+    if ss.steps_key != key:
+        rows = df.get_steps(key, DB_PATH)
+        ss.steps = [{"step_name": r["step_name"], "kind": r["kind"], "target_path": r["target_path"],
+                     "args": _args_to_text(r["args_json"]), "on_failure": r["on_failure"],
+                     "enabled": bool(r["enabled"])} for r in rows]
+        ss.steps_key = key
+
+    for si, s in enumerate(ss.steps):
+        with st.container(border=True):
+            top = st.columns([0.5, 6, 0.6, 0.6, 0.6])
+            top[0].markdown(f"### {si + 1}")
+            s["step_name"] = top[1].text_input("Step name", value=s["step_name"],
+                                               key=f"sn_{key}_{si}", placeholder="e.g. order client ingest")
+            if top[2].button("▲", key=f"up_{key}_{si}", disabled=si == 0):
+                ss.steps[si - 1], ss.steps[si] = ss.steps[si], ss.steps[si - 1]; st.rerun()
+            if top[3].button("▼", key=f"dn_{key}_{si}", disabled=si == len(ss.steps) - 1):
+                ss.steps[si + 1], ss.steps[si] = ss.steps[si], ss.steps[si + 1]; st.rerun()
+            if top[4].button("✕", key=f"delstep_{key}_{si}"):
+                ss.steps.pop(si); st.rerun()
+
+            r1 = st.columns([1, 3])
+            s["kind"] = r1[0].selectbox("Type", ["python", "bat"],
+                                        index=0 if s["kind"] == "python" else 1, key=f"sk_{key}_{si}")
+            s["target_path"] = r1[1].text_input("Script / .bat path", value=s["target_path"],
+                                                key=f"sp_{key}_{si}",
+                                                placeholder=r"C:\Sarthi\order client ingest.py")
+            r2 = st.columns([3, 1])
+            s["args"] = r2[0].text_input("Arguments", value=s["args"], key=f"sa_{key}_{si}",
+                                         placeholder="--input-file {assembled_path}")
+            s["on_failure"] = r2[1].selectbox("On failure", ["stop", "continue"],
+                                              index=0 if s["on_failure"] == "stop" else 1,
+                                              key=f"sf_{key}_{si}")
+
+    b1, b2 = st.columns([1, 4])
+    if b1.button("+ Add a step"):
+        ss.steps.append({"step_name": "", "kind": "python", "target_path": "",
+                         "args": "", "on_failure": "stop", "enabled": True})
+        st.rerun()
+    if b2.button("Save steps", type="primary"):
+        payload = []
+        for i, s in enumerate(ss.steps):
+            if not s["step_name"].strip() or not s["target_path"].strip():
+                continue
+            payload.append({"step_order": (i + 1) * 10, "step_name": s["step_name"].strip(),
+                            "kind": s["kind"], "target_path": s["target_path"].strip(),
+                            "args_json": s["args"].strip(), "on_failure": s["on_failure"],
+                            "enabled": 1})
+        df.set_steps(key, payload, DB_PATH)
+        ss.steps_key = None
+        st.success("Steps saved.")
+
+    st.divider()
+    st.subheader("Recent runs of this type")
+    rr = df.list_runs(limit=50, dump_type=key, db_path=DB_PATH)
+    if not rr:
+        st.caption("No runs yet.")
+    else:
+        st.dataframe(pd.DataFrame([{
+            "when": r["finished_at"], "batch": r["batch_id"], "result": r["status"],
+            "steps": ", ".join(f"{x['step']}:{x['status']}" for x in json.loads(r["steps_json"] or "[]")) or "—",
+        } for r in rr]), use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# RUN HISTORY
+# ===========================================================================
+elif ss.screen == "Run history":
+    st.title("Run history")
+    st.caption("Every dump the receiver handled, and how each step went.")
+    opts = ["(all)"] + [t["key"] for t in types]
+    flt = st.selectbox("Show", opts)
+    runs = df.list_runs(limit=300, dump_type=None if flt == "(all)" else flt, db_path=DB_PATH)
+    if not runs:
+        st.info("No runs recorded yet.")
+    else:
+        st.dataframe(pd.DataFrame([{
+            "when": r["finished_at"], "dump type": r["dump_type"], "batch": r["batch_id"],
+            "saved to": r["saved_path"],
+            "steps": ", ".join(f"{x['step']}:{x['status']}" for x in json.loads(r["steps_json"] or "[]")) or "—",
+            "result": r["status"], "note": r["message"] or "",
+        } for r in runs]), use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# NEON CATALOG
+# ===========================================================================
+elif ss.screen == "Neon catalog":
+    st.title("Neon catalog")
+    st.caption("The list of dump types that can be sent — managed in Plan My Day. "
+               "Sync pulls it here; your local steps and folders are kept.")
+    if st.button("Sync now", type="primary"):
+        res = neon_sync.sync(DB_PATH)
+        if res.get("error"):
+            st.error(res["error"])
+        else:
+            st.success(f"{res['total']} types · {res['created']} new, {res['updated']} updated")
+            st.rerun()
+    cat = [t for t in types if t.get("source") == "neon"]
+    if not cat:
+        st.info("Nothing synced yet. Set the Neon URL in secrets.toml and click Sync.")
+    else:
+        st.dataframe(pd.DataFrame([{
+            "key": t["key"], "name": t["name"], "handler": t.get("handler"),
+            "active": bool(t["enabled"]), "max_files": t.get("max_files"),
+            "has steps": bool(df.get_steps(t["key"], DB_PATH)),
+            "save folder": t["save_folder"] or "",
+        } for t in cat]), use_container_width=True, hide_index=True)
+        missing = [t["key"] for t in cat if t["enabled"] and not df.get_steps(t["key"], DB_PATH)]
+        if missing:
+            st.warning("Active in the catalog but no steps yet (won't run until configured): "
+                       + ", ".join(missing))
