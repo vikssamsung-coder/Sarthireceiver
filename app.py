@@ -20,11 +20,14 @@ import streamlit as st
 import dump_flows as df
 import flow_engine
 import neon_sync
+import mis_flows as mf
+import app_mis
 
-DB_PATH = Path(r"D:\Sarthi\multipart_buffer\dump_flows.sqlite3")
+DB_PATH = df.DEFAULT_DB          # one path, defined once, in dump_flows
 
 st.set_page_config(page_title="Sarthi Dump Processor", layout="wide")
 df.init_db(DB_PATH)
+mf.init_db(DB_PATH)               # adds the mis_* tables; touches nothing existing
 
 # ---- light styling to match the design ------------------------------------
 st.markdown("""
@@ -54,12 +57,17 @@ ss.setdefault("rec_key", None)      # which type's recognition is loaded
 ss.setdefault("groups", [])         # recognition groups being edited
 ss.setdefault("steps_key", None)
 ss.setdefault("steps", [])
+ss.setdefault("mis_sel", None)       # selected MIS report (for Configure MIS)
+ss.setdefault("mis_steps_key", None)
+ss.setdefault("mis_steps", [])
 
 
-def goto(screen, sel=None):
+def goto(screen, sel=None, mis_sel=None):
     ss.screen = screen
     if sel is not None:
         ss.sel = sel
+    if mis_sel is not None:
+        ss.mis_sel = mis_sel
 
 
 def _args_to_text(raw):
@@ -159,10 +167,12 @@ def recognition_builder(key):
 with st.sidebar:
     st.markdown("### ◈ Dump Processor")
     st.caption("Sarthi · receiver")
-    NAV = ["Overview", "Dump types", "Run history", "Neon catalog", "Settings"]
-    # Configure is a sub-screen of "Dump types" — keep the nav on that while editing
-    current_nav = "Dump types" if ss.screen == "Configure" else (
-        ss.screen if ss.screen in NAV else "Overview")
+    NAV = ["Overview", "Dump types", "MIS reports", "Run history", "MIS history",
+           "Neon catalog", "Settings"]
+    # Configure screens are sub-screens — keep the nav on their parent while editing
+    _PARENT = {"Configure": "Dump types", "Configure MIS": "MIS reports"}
+    current_nav = _PARENT.get(ss.screen,
+                              ss.screen if ss.screen in NAV else "Overview")
     nav = st.radio("Go to", NAV, index=NAV.index(current_nav),
                    label_visibility="collapsed")
     if nav != current_nav:
@@ -418,6 +428,18 @@ elif ss.screen == "Configure":
             "when": r["finished_at"], "batch": r["batch_id"], "result": r["status"],
             "steps": ", ".join(f"{x['step']}:{x['status']}" for x in json.loads(r["steps_json"] or "[]")) or "—",
         } for r in rr]), use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# MIS REPORTS  ·  CONFIGURE MIS  ·  MIS HISTORY
+# ===========================================================================
+elif ss.screen == "MIS reports":
+    app_mis.screen_mis(DB_PATH, types, goto)
+
+elif ss.screen == "Configure MIS":
+    app_mis.screen_configure_mis(DB_PATH, types, goto)
+
+elif ss.screen == "MIS history":
+    app_mis.screen_mis_history(DB_PATH)
 
 # ===========================================================================
 # RUN HISTORY

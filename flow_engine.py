@@ -126,4 +126,19 @@ def run_dump_flow(batch_id, dump_type, assembled_path, subject=None, sender_emai
         return True, results
     any_failed = any(r["status"] == "failed" for r in results)
     _confirm("partial" if any_failed else "success", results)
+
+    # --- MIS chain -----------------------------------------------------------
+    # Only a clean success feeds a report. 'partial' means a step failed, so the
+    # data is suspect — never build an MIS on it.
+    # Enqueue only: a few SELECTs and an INSERT OR IGNORE. Never builds, never
+    # mails, never blocks the dump. Wrapped so an MIS problem CANNOT break a dump.
+    if not any_failed:
+        try:
+            import mis_triggers
+            fired = mis_triggers.on_dump_complete(dump_type, batch_id, db_path=db_path)
+            for k in fired:
+                log(f"MIS queued: {k}")
+        except Exception as e:
+            log(f"MIS trigger skipped: {e}")
+
     return True, results
