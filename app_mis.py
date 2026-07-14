@@ -149,6 +149,20 @@ def screen_mis(DB_PATH: Path, dump_types: list, goto) -> None:
                     st.success("Queued. The MIS poller picks it up on its next pass "
                                "(or run: python mis_poller.py --once).")
 
+    # A schedule can only fire if mis_poller.py is running. The Streamlit app does
+    # NOT tick the clock. Surface that loudly rather than letting a report quietly
+    # never run.
+    overdue = [t for t in reports
+               if t.get("enabled") and mt._due(t, __import__("datetime").datetime.now())]
+    if overdue:
+        st.error(
+            "**" + ", ".join(t["key"] for t in overdue) + "** "
+            + ("is" if len(overdue) == 1 else "are")
+            + " past due and still not queued — which means **no MIS poller is "
+              "running**. The app shows the schedule; `mis_poller.py` fires it.\n\n"
+              "Start it: `run_sarthi.bat` (receiver + MIS), or catch up right now "
+              "with `python mis_poller.py --once`.", icon="⏰")
+
     st.divider()
     st.subheader("Queue")
     q = mf.list_queue(20, db_path=DB_PATH)

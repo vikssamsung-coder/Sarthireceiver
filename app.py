@@ -22,12 +22,18 @@ import flow_engine
 import neon_sync
 import mis_flows as mf
 import app_mis
+import service_manager
 
 DB_PATH = df.DEFAULT_DB          # one path, defined once, in dump_flows
 
 st.set_page_config(page_title="Sarthi Dump Processor", layout="wide")
 df.init_db(DB_PATH)
 mf.init_db(DB_PATH)               # adds the mis_* tables; touches nothing existing
+
+# Launching the app IS launching the system. The receiver and the MIS poller come
+# up behind it as one detached background process. PID-locked, so Streamlit's
+# reruns cannot spawn duplicates; already-running is a cheap no-op.
+SVC = service_manager.ensure_running()
 
 # ---- light styling to match the design ------------------------------------
 st.markdown("""
@@ -168,7 +174,7 @@ with st.sidebar:
     st.markdown("### ◈ Dump Processor")
     st.caption("Sarthi · receiver")
     NAV = ["Overview", "Dump types", "MIS reports", "Run history", "MIS history",
-           "Neon catalog", "Settings"]
+           "Neon catalog", "Services", "Settings"]
     # Configure screens are sub-screens — keep the nav on their parent while editing
     _PARENT = {"Configure": "Dump types", "Configure MIS": "MIS reports"}
     current_nav = _PARENT.get(ss.screen,
@@ -177,6 +183,20 @@ with st.sidebar:
                    label_visibility="collapsed")
     if nav != current_nav:
         ss.screen = nav
+
+    st.divider()
+    if SVC.get("running"):
+        st.markdown('<span class="pill on">● Receiver &amp; MIS running</span>',
+                    unsafe_allow_html=True)
+        st.caption(f"since {SVC.get('started_at') or '—'}")
+    else:
+        st.markdown('<span class="pill fail">● Services DOWN</span>',
+                    unsafe_allow_html=True)
+        st.caption(SVC.get("error") or "Mail is not being polled and schedules "
+                                       "will not fire.")
+        if st.button("Start services", type="primary", use_container_width=True):
+            service_manager.ensure_running()
+            st.rerun()
 
     st.divider()
     url = neon_sync.load_neon_url()
@@ -488,6 +508,53 @@ elif ss.screen == "Neon catalog":
         if missing:
             st.warning("Active in the catalog but no steps yet (won't run until configured): "
                        + ", ".join(missing))
+
+# ===========================================================================
+# SERVICES
+# ===========================================================================
+elif ss.screen == "Services":
+    st.title("Services")
+    st.caption("The receiver polls Outlook. The MIS poller fires schedules, picks up "
+               "report requests, and drains the build queue. Both start with this app "
+               "and keep running after you close it.")
+
+    svc = service_manager.status(force=True)
+    if svc["running"]:
+        st.markdown(f"<span class='pill on'>● Running</span> &nbsp; "
+                    f"<span class='mono'>pid {svc['pid']} · since {svc['started_at']}</span>",
+                    unsafe_allow_html=True)
+    else:
+        st.markdown("<span class='pill fail'>● Not running</span>", unsafe_allow_html=True)
+        st.error("Mail is not being polled, and no schedule can fire.")
+
+    b1, b2, b3 = st.columns([1, 1, 3])
+    if b1.button("Start" if not svc["running"] else "Restart", type="primary"):
+        r = service_manager.restart() if svc["running"] else service_manager.ensure_running()
+        if r.get("error"):
+            st.error(r["error"])
+        st.rerun()
+    if b2.button("Stop", disabled=not svc["running"]):
+        if service_manager.stop():
+            st.warning("Stopped. Mail will not be processed and schedules will not fire.")
+        else:
+            st.error("Could not stop it — kill the pid manually.")
+        st.rerun()
+    if b3.button("Run MIS pass now"):
+        import mis_poller
+        with st.spinner("Polling requests, ticking schedules, draining the queue…"):
+            try:
+                mis_poller.one_pass(DB_PATH)
+                st.success("Pass complete.")
+            except Exception as e:
+                st.error(f"Pass failed: {e}")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Log")
+    st.caption(f"{service_manager.LOGFILE}")
+    st.code(service_manager.tail_log(120) or "(empty)")
+    if st.button("Refresh log"):
+        st.rerun()
 
 # ===========================================================================
 # SETTINGS  (HTTPS update — no git, like PMD)

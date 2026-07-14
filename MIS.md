@@ -118,3 +118,37 @@ times — the schedule lives in `mis_types` and is edited in the app.
 Revert the two hunks, delete `mis_*.py` and `app_mis.py`. The four `mis_*` tables
 sit unused. MIS only ever **reads** `dump_types` and `flow_runs` — nothing on the
 dump side is affected.
+
+---
+
+## Launching
+
+**`streamlit run app.py` is the only thing you run.**
+
+The app starts `sarthi_service.py` behind it — the Outlook receiver and the MIS
+poller — as one detached background process. The sidebar shows `● Receiver & MIS
+running`. The **Services** screen has status, the live log, and Start/Stop/Restart.
+
+`service_manager.py` holds a PID lock beside the registry. Streamlit re-runs the
+whole script on every click, so `ensure_running()` is called constantly — it
+checks the lock, confirms the pid is alive AND is actually ours (Windows recycles
+pids), and does nothing if so. Duplicates are impossible.
+
+The services **outlive the app**: close the browser or the Streamlit terminal and
+mail keeps being polled, schedules keep firing. That is deliberate — the whole
+point is that a report goes out at 10:45 whether or not anyone has the app open.
+Stop them from the Services screen when you actually want them down.
+
+`run_sarthi.bat` still exists for a headless box (Task Scheduler at boot, no app).
+Both paths are safe: whichever starts first takes the lock, the other sees it.
+
+## When a schedule doesn't fire
+
+    python mis_why.py
+
+Tells you, per report: whether anything is watching the clock, whether today's day
+bit is set, whether the slot has passed, whether it already fired, which dumps have
+landed, and when it last queued and last ran.
+
+The MIS reports screen also shows a red banner when a report is past due and still
+not queued — which always means no poller is running.
