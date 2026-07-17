@@ -48,7 +48,7 @@ OUTPUT_PREFIX = "OUTPUT="
 # checkable with:  python -c "import mis_engine; print(mis_engine.ENGINE_VERSION)"
 # If the box shows an older number than the zip, the update did not land / the
 # poller was not restarted.
-ENGINE_VERSION = "2026-07-17.utf8"
+ENGINE_VERSION = "2026-07-17.stepdetail"
 
 
 def _run_step(kind, target, args, working_dir, log):
@@ -139,15 +139,22 @@ def run_mis_flow(report_key, trigger="manual", params="", req_id=None,
                 "requester_email": requester_email, "steps": steps or [],
                 "message": msg}
 
+    def _fail_phase(phase, msg):
+        """A failure BEFORE any step ran (config / setup / output-contract).
+        Records a single phase marker so the history screen shows where it broke
+        rather than an empty step list."""
+        return _fail(msg, [{"n": 0, "step": phase, "phase": phase,
+                            "status": "failed", "error": msg}])
+
     if not int(t.get("enabled") or 0):
-        return _fail(f"report '{report_key}' is disabled")
+        return _fail_phase("config", f"report '{report_key}' is disabled")
 
     out_folder = t.get("out_folder") or ""
     if out_folder:
         try:
             Path(out_folder).mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            return _fail(f"cannot create out_folder '{out_folder}': {e}")
+            return _fail_phase("setup", f"cannot create out_folder '{out_folder}': {e}")
 
     context = {
         "req_id": str(req_id or ""),
@@ -166,25 +173,32 @@ def run_mis_flow(report_key, trigger="manual", params="", req_id=None,
     try:
         steps = mf.build_mis_steps(report_key, context, db_path=db_path)
     except Exception as e:
-        return _fail(f"failed to load flow for '{report_key}': {e}")
+        return _fail_phase("load", f"failed to load flow for '{report_key}': {e}")
 
     if not steps:
-        return _fail(f"no steps configured for '{report_key}'")
+        return _fail_phase("config", f"no steps configured for '{report_key}'")
 
     results, output_path = [], ""
 
     # ---- STRICT SEQUENCE: one at a time, in order, stop on failure ----------
-    for s in steps:
+    for idx, s in enumerate(steps, 1):
         sname = s["step_name"]
         if dry_run:
-            results.append({"step": sname, "status": "dry-run"})
+            results.append({"n": idx, "step": sname, "phase": "run",
+                            "status": "dry-run"})
             continue
 
         ok, stdout, err = _run_step(s["kind"], s["target_path"], s["args"],
                                     s["working_dir"], log)
-        entry = {"step": sname, "status": "ok" if ok else "failed"}
+        entry = {"n": idx, "step": sname, "phase": "run",
+                 "status": "ok" if ok else "failed"}
         if err:
-            entry["message"] = err
+            # Full reason, kept per-step so the history screen can show exactly
+            # which step broke and why — not just a truncated summary line.
+            entry["error"] = err
+        if stdout and stdout.strip():
+            # last few stdout lines help even on success (row counts etc.)
+            entry["tail"] = " | ".join(stdout.strip().splitlines()[-4:])[:600]
 
         found = _scan_output(stdout)
         if found:
@@ -195,9 +209,9 @@ def run_mis_flow(report_key, trigger="manual", params="", req_id=None,
         results.append(entry)
 
         if not ok and (s.get("on_failure") or "stop") == "stop":
-            return _fail(f"stopped at step '{sname}': {err}", results, output_path)
+            return _fail(f"step {idx} '{sname}' failed → {err}", results, output_path)
         if not ok:
-            log(f"step '{sname}' failed but on_failure=continue.")
+            log(f"step {idx} '{sname}' failed but on_failure=continue.")
 
     if dry_run:
         mf.finish_mis_run(run_id, "dry-run", results, "", "", db_path=db_path)
@@ -207,11 +221,16 @@ def run_mis_flow(report_key, trigger="manual", params="", req_id=None,
 
     # ---- OUTPUT contract ---------------------------------------------------
     if not output_path:
-        return _fail("no step printed 'OUTPUT=<abs path>' — the build produced "
-                     "nothing the engine can deliver", results)
+        # Every step ran but none emitted the contract line. Name the last step
+        # so the fix (add OUTPUT= there) is obvious.
+        last = steps[-1]["step_name"] if steps else "?"
+        return _fail(f"all {len(steps)} step(s) ran but none printed "
+                     f"'OUTPUT=<abs path>'. Add it to the last step ('{last}') "
+                     f"after it saves the file.", results)
 
     if not Path(output_path).is_file():
-        return _fail(f"OUTPUT path does not exist: {output_path}", results, output_path)
+        return _fail(f"OUTPUT path does not exist on disk: {output_path}",
+                     results, output_path)
 
     mf.finish_mis_run(run_id, "built", results, output_path, "", db_path=db_path)
     return {"status": "done", "output_path": output_path, "run_id": run_id,

@@ -396,9 +396,28 @@ def screen_configure_mis(DB_PATH: Path, dump_types: list, goto) -> None:
     else:
         for r in runs:
             icon = {"success": "✅", "built": "📄", "failed": "❌"}.get(r["status"], "⏳")
-            with st.expander(f"{icon}  {r['finished_at']}  ·  {r['trigger']}  ·  {r['status']}"):
+            try:
+                steps = json.loads(r.get("steps_json") or "[]")
+            except Exception:
+                steps = []
+            where = _phase_label(steps)
+            with st.expander(f"{icon}  {r['finished_at']}  ·  {r['trigger']}  —  {where}"):
                 if r.get("message"):
-                    st.write(r["message"])
+                    if r["status"] == "failed":
+                        st.error(r["message"])
+                    else:
+                        st.write(r["message"])
+                if steps:
+                    st.dataframe(pd.DataFrame([{
+                        "#": s.get("n", ""), "phase": s.get("phase", "run"),
+                        "step": s.get("step", ""), "status": s.get("status", ""),
+                        "detail": (s.get("error") or s.get("tail") or
+                                   s.get("output") or ""),
+                    } for s in steps]), use_container_width=True, hide_index=True)
+                    for s in steps:
+                        if s.get("status") == "failed" and s.get("error"):
+                            st.markdown(f"**Why «{s.get('step')}» failed:**")
+                            st.code(s["error"])
                 if r.get("output_path"):
                     st.markdown(f"<span class='mono'>{r['output_path']}</span>",
                                 unsafe_allow_html=True)
@@ -406,34 +425,92 @@ def screen_configure_mis(DB_PATH: Path, dump_types: list, goto) -> None:
                     if p.is_file():
                         st.download_button("Download", p.read_bytes(), file_name=p.name,
                                            key=f"mdl_{r['id']}")
-                try:
-                    steps = json.loads(r.get("steps_json") or "[]")
-                except Exception:
-                    steps = []
-                if steps:
-                    st.dataframe(pd.DataFrame(steps), use_container_width=True,
-                                 hide_index=True)
 
 
 # ===========================================================================
 # MIS RUN HISTORY (all reports)
 # ===========================================================================
+def _phase_label(steps):
+    """Summarise where a run ended: which step, or which pre-run phase."""
+    if not steps:
+        return "no detail recorded"
+    failed = [s for s in steps if s.get("status") == "failed"]
+    if not failed:
+        return f"{len(steps)} step(s) ok"
+    f = failed[0]
+    ph = f.get("phase", "run")
+    if ph in ("config", "setup", "load"):
+        return f"failed in {ph} (before any step ran)"
+    n = f.get("n")
+    return f"failed at step {n}: {f.get('step')}" if n else f"failed: {f.get('step')}"
+
+
 def screen_mis_history(DB_PATH: Path) -> None:
     st.title("MIS history")
-    st.caption("Every report the builder ran, how each step went, and where it went.")
+    st.caption("Every run, which step it reached, and the exact error if it failed.")
     reports = mf.list_mis_types(db_path=DB_PATH)
     opts = ["(all)"] + [t["key"] for t in reports]
-    flt = st.selectbox("Show", opts)
+    c1, c2 = st.columns([2, 1])
+    flt = c1.selectbox("Report", opts)
+    only_failed = c2.checkbox("Only failures", value=False)
+
     runs = mf.list_mis_runs(limit=300,
                             report_key=None if flt == "(all)" else flt,
                             db_path=DB_PATH)
+    if only_failed:
+        runs = [r for r in runs if r["status"] == "failed"]
     if not runs:
-        st.info("No MIS runs recorded yet.")
+        st.info("No matching MIS runs.")
         return
-    st.dataframe(pd.DataFrame([{
-        "when": r["finished_at"], "report": r["report_key"], "trigger": r["trigger"],
-        "result": r["status"], "output": r["output_path"] or "",
-        "steps": ", ".join(f"{x['step']}:{x['status']}"
-                           for x in json.loads(r["steps_json"] or "[]")) or "—",
-        "note": r["message"] or "",
-    } for r in runs]), use_container_width=True, hide_index=True)
+
+    for r in runs:
+        try:
+            steps = json.loads(r.get("steps_json") or "[]")
+        except Exception:
+            steps = []
+
+        icon = {"success": "✅", "built": "📄", "failed": "❌",
+                "running": "⏳", "dry-run": "🧪"}.get(r["status"], "•")
+        where = _phase_label(steps)
+        head = (f"{icon}  {r['finished_at']}  ·  {r['report_key']}  ·  "
+                f"{r['trigger']}  —  {where}")
+
+        with st.expander(head, expanded=False):
+            # the top-line reason, in full (never truncated)
+            if r.get("message"):
+                if r["status"] == "failed":
+                    st.error(r["message"])
+                else:
+                    st.write(r["message"])
+
+            # per-step table: n, phase, step, status, and the reason
+            if steps:
+                rows = []
+                for s in steps:
+                    rows.append({
+                        "#": s.get("n", ""),
+                        "phase": s.get("phase", "run"),
+                        "step": s.get("step", ""),
+                        "status": s.get("status", ""),
+                        "detail": (s.get("error") or s.get("tail") or
+                                   s.get("output") or ""),
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                             hide_index=True)
+
+                # spell out the failing step's full error separately — table
+                # cells clip, and the error is the thing you actually need
+                for s in steps:
+                    if s.get("status") == "failed" and s.get("error"):
+                        st.markdown(f"**Why step «{s.get('step')}» failed:**")
+                        st.code(s["error"])
+            else:
+                st.caption("No step detail recorded for this run.")
+
+            if r.get("output_path"):
+                st.markdown(f"<span class='mono'>output: {r['output_path']}</span>",
+                            unsafe_allow_html=True)
+                p = Path(r["output_path"])
+                if p.is_file():
+                    st.download_button("Download output", p.read_bytes(),
+                                       file_name=p.name, key=f"hdl_{r['id']}")
