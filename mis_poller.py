@@ -187,11 +187,36 @@ def drain(db_path: Path = DB_PATH) -> int:
     return n
 
 
+def _reap_stuck_runs(db_path: Path = DB_PATH, older_than_min: int = 60) -> int:
+    """A run row left at 'running' means the poller was killed mid-build (crash,
+    reboot, Ctrl+C). Mark old ones failed so they stop showing as in-progress and
+    stop blocking the report. The queue side is handled by release_stale_claims."""
+    import sqlite3
+    try:
+        c = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            cur = c.execute(
+                "UPDATE mis_runs SET status='failed', "
+                "message=COALESCE(message,'')||' [reaped: poller restarted mid-run]', "
+                "finished_at=? WHERE status='running' "
+                "AND (julianday('now','localtime') - julianday(started_at))*1440 > ?",
+                (mf._now(), int(older_than_min)))
+            c.commit()
+            return cur.rowcount or 0
+        finally:
+            c.close()
+    except Exception:
+        return 0
+
+
 def one_pass(db_path: Path = DB_PATH) -> None:
     mf.init_db(db_path)
     released = mf.release_stale_claims(STALE_CLAIM_MIN, db_path=db_path)
     if released:
         log(f"released {released} stale claim(s)")
+    reaped = _reap_stuck_runs(db_path)
+    if reaped:
+        log(f"marked {reaped} stuck 'running' run(s) as failed")
     poll_requests(db_path)
     tick(db_path)
     drain(db_path)
@@ -219,6 +244,7 @@ def main(argv) -> int:
         return 0
 
     log(f"MIS poller watching (every {a.interval}s) — db {db}")
+    log(f"engine version {mis_engine.ENGINE_VERSION}")
     while True:
         try:
             one_pass(db)

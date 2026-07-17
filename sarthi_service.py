@@ -70,11 +70,15 @@ class Child:
 
         while not self.stop:
             say(self.tag, "starting: " + " ".join(self.args))
+            child_env = dict(os.environ)
+            child_env["PYTHONIOENCODING"] = "utf-8"
+            child_env["PYTHONUTF8"] = "1"
             try:
                 self.proc = subprocess.Popen(
                     [sys.executable, "-u"] + self.args, cwd=str(HERE),
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1)
+                    text=True, encoding="utf-8", errors="replace",
+                    env=child_env, bufsize=1)
             except Exception as e:
                 say(self.tag, f"could not start: {e}")
                 return

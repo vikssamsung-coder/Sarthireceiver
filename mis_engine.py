@@ -44,10 +44,23 @@ import mis_flows as mf
 STEP_TIMEOUT_SEC = int(os.environ.get("SARTHI_MIS_STEP_TIMEOUT", "1800"))  # 30 min
 OUTPUT_PREFIX = "OUTPUT="
 
+# Bump when the engine's run contract changes. Printed by mis_poller on start and
+# checkable with:  python -c "import mis_engine; print(mis_engine.ENGINE_VERSION)"
+# If the box shows an older number than the zip, the update did not land / the
+# poller was not restarted.
+ENGINE_VERSION = "2026-07-17.utf8"
+
 
 def _run_step(kind, target, args, working_dir, log):
     """Own subprocess runner (not flow_engine's) because the OUTPUT= contract
-    needs stdout back. Returns (ok, stdout, message)."""
+    needs stdout back. Returns (ok, stdout, message).
+
+    The child's stdio is forced to UTF-8. On Windows the console codepage is
+    cp1252, so a build script that prints emoji (✅ ❌) or any non-Latin-1 text
+    would otherwise die with UnicodeEncodeError — a crash in a print statement,
+    not in the report logic. PYTHONIOENCODING + PYTHONUTF8 make every child
+    emoji-safe without editing a single build script."""
+    import os as _os
     target = str(target or "")
     if not target or not Path(target).is_file():
         return False, "", f"target not found: {target}"
@@ -57,9 +70,15 @@ def _run_step(kind, target, args, working_dir, log):
     wd = working_dir or str(Path(target).parent) or None
     log(f"run {kind}: {' '.join(str(x) for x in cmd)}")
 
+    child_env = dict(_os.environ)
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
+
     try:
         p = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
-                           timeout=STEP_TIMEOUT_SEC, shell=(kind == "bat"))
+                           encoding="utf-8", errors="replace",
+                           env=child_env, timeout=STEP_TIMEOUT_SEC,
+                           shell=(kind == "bat"))
     except subprocess.TimeoutExpired:
         return False, "", f"timed out after {STEP_TIMEOUT_SEC}s"
     except Exception as e:
