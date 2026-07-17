@@ -310,7 +310,10 @@ def screen_configure_mis(DB_PATH: Path, dump_types: list, goto) -> None:
         ss.mis_steps = [{"step_name": r["step_name"], "kind": r["kind"],
                          "target_path": r["target_path"],
                          "args": _args_to_text(r["args_json"]),
-                         "on_failure": r["on_failure"], "enabled": bool(r["enabled"])}
+                         "on_failure": r["on_failure"],
+                         "timeout_min": int((r["timeout_sec"] if "timeout_sec" in r.keys()
+                                             else 0) or 0) // 60,
+                         "enabled": bool(r["enabled"])}
                         for r in rows]
         ss.mis_steps_key = key
 
@@ -338,17 +341,24 @@ def screen_configure_mis(DB_PATH: Path, dump_types: list, goto) -> None:
             s["target_path"] = r1[1].text_input("Script / .bat path", value=s["target_path"],
                                                 key=f"mp_{key}_{si}",
                                                 placeholder=r"D:\dump_processor_app\mis_build_from_dumps.py")
-            r2 = st.columns([3, 1])
+            r2 = st.columns([3, 1, 1])
             s["args"] = r2[0].text_input("Arguments", value=s["args"], key=f"ma_{key}_{si}",
                                          placeholder="--dumps orderbook --out {out_folder} --report {report_key}")
             s["on_failure"] = r2[1].selectbox("On failure", ["stop", "continue"],
                                               index=0 if s["on_failure"] == "stop" else 1,
                                               key=f"mf_{key}_{si}")
+            s["timeout_min"] = r2[2].number_input(
+                "Timeout (min)", min_value=0, max_value=1440,
+                value=int(s.get("timeout_min", 0) or 0), step=5,
+                key=f"mt_{key}_{si}",
+                help="Max minutes this step may run. 0 = use the default (30 min). "
+                     "Raise it for a heavy step like a classifier.")
 
     b1, b2 = st.columns([1, 4])
     if b1.button("+ Add a step"):
         ss.mis_steps.append({"step_name": "", "kind": "python", "target_path": "",
-                             "args": "", "on_failure": "stop", "enabled": True})
+                             "args": "", "on_failure": "stop", "timeout_min": 0,
+                             "enabled": True})
         st.rerun()
 
     # ---- SAVE everything ---------------------------------------------------
@@ -371,7 +381,9 @@ def screen_configure_mis(DB_PATH: Path, dump_types: list, goto) -> None:
                             "step_name": s["step_name"].strip(),
                             "kind": s["kind"], "target_path": s["target_path"].strip(),
                             "args_json": s["args"].strip(),
-                            "on_failure": s["on_failure"], "enabled": 1})
+                            "on_failure": s["on_failure"],
+                            "timeout_sec": int(s.get("timeout_min", 0) or 0) * 60,
+                            "enabled": 1})
         mf.set_mis_steps(key, payload, db_path=DB_PATH)
         ss.mis_steps_key = None
         st.success("Saved — details, triggers and steps.")

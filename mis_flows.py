@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS mis_flow_steps (
     args_json     TEXT NOT NULL DEFAULT '[]',
     working_dir   TEXT,
     on_failure    TEXT NOT NULL DEFAULT 'stop',
+    timeout_sec   INTEGER NOT NULL DEFAULT 0,
     enabled       INTEGER NOT NULL DEFAULT 1,
     updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -108,6 +109,7 @@ _MIGRATIONS = {
     "mis_queue.message": "ALTER TABLE mis_queue ADD COLUMN message TEXT",
     "mis_runs.trigger": "ALTER TABLE mis_runs ADD COLUMN trigger TEXT",
     "mis_runs.queue_id": "ALTER TABLE mis_runs ADD COLUMN queue_id INTEGER",
+    "mis_flow_steps.timeout_sec": "ALTER TABLE mis_flow_steps ADD COLUMN timeout_sec INTEGER DEFAULT 0",
 }
 
 # The dump statuses that mean "this feed landed cleanly today".
@@ -244,11 +246,12 @@ def set_mis_steps(key, steps: list, db_path: Path = DEFAULT_DB) -> None:
                 args = json.dumps(args)
             c.execute(
                 "INSERT INTO mis_flow_steps(mis_type_key,step_order,step_name,kind,"
-                "target_path,args_json,working_dir,on_failure,enabled,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "target_path,args_json,working_dir,on_failure,timeout_sec,enabled,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (key, int(s.get("step_order", (i + 1) * 10)), s["step_name"],
                  s.get("kind", "python"), s["target_path"], args,
                  s.get("working_dir") or None, s.get("on_failure", "stop"),
+                 int(s.get("timeout_sec", 0) or 0),
                  int(s.get("enabled", 1)), _now()))
 
 
@@ -267,6 +270,7 @@ def build_mis_steps(key, context: dict, db_path: Path = DEFAULT_DB) -> list:
             "args": df._render_args(json.loads(r["args_json"] or "[]"), context),
             "working_dir": r["working_dir"] or None,
             "on_failure": r["on_failure"] or "stop",
+            "timeout_sec": (r["timeout_sec"] if "timeout_sec" in r.keys() else 0) or 0,
         })
     return steps
 

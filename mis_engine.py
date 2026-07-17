@@ -48,12 +48,16 @@ OUTPUT_PREFIX = "OUTPUT="
 # checkable with:  python -c "import mis_engine; print(mis_engine.ENGINE_VERSION)"
 # If the box shows an older number than the zip, the update did not land / the
 # poller was not restarted.
-ENGINE_VERSION = "2026-07-17.stepdetail"
+ENGINE_VERSION = "2026-07-17.steptimeout"
 
 
-def _run_step(kind, target, args, working_dir, log):
+def _run_step(kind, target, args, working_dir, log, timeout_sec=0):
     """Own subprocess runner (not flow_engine's) because the OUTPUT= contract
     needs stdout back. Returns (ok, stdout, message).
+
+    timeout_sec: per-step limit. 0 (or unset) falls back to the global
+    STEP_TIMEOUT_SEC. A heavy classifier can be given a big number while quick
+    steps keep a tight one.
 
     The child's stdio is forced to UTF-8. On Windows the console codepage is
     cp1252, so a build script that prints emoji (✅ ❌) or any non-Latin-1 text
@@ -65,10 +69,12 @@ def _run_step(kind, target, args, working_dir, log):
     if not target or not Path(target).is_file():
         return False, "", f"target not found: {target}"
 
+    limit = int(timeout_sec) if int(timeout_sec or 0) > 0 else STEP_TIMEOUT_SEC
+
     cmd = [str(target)] + list(args or []) if kind == "bat" \
         else [sys.executable, str(target)] + list(args or [])
     wd = working_dir or str(Path(target).parent) or None
-    log(f"run {kind}: {' '.join(str(x) for x in cmd)}")
+    log(f"run {kind} (limit {limit}s): {' '.join(str(x) for x in cmd)}")
 
     child_env = dict(_os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
@@ -77,10 +83,12 @@ def _run_step(kind, target, args, working_dir, log):
     try:
         p = subprocess.run(cmd, cwd=wd, capture_output=True, text=True,
                            encoding="utf-8", errors="replace",
-                           env=child_env, timeout=STEP_TIMEOUT_SEC,
+                           env=child_env, timeout=limit,
                            shell=(kind == "bat"))
     except subprocess.TimeoutExpired:
-        return False, "", f"timed out after {STEP_TIMEOUT_SEC}s"
+        return False, "", (f"timed out after {limit}s — raise this step's timeout "
+                           f"if the script legitimately needs longer, or check it "
+                           f"isn't hung")
     except Exception as e:
         return False, "", f"launch failed: {e}"
 
@@ -189,7 +197,8 @@ def run_mis_flow(report_key, trigger="manual", params="", req_id=None,
             continue
 
         ok, stdout, err = _run_step(s["kind"], s["target_path"], s["args"],
-                                    s["working_dir"], log)
+                                    s["working_dir"], log,
+                                    timeout_sec=s.get("timeout_sec", 0))
         entry = {"n": idx, "step": sname, "phase": "run",
                  "status": "ok" if ok else "failed"}
         if err:
