@@ -23,12 +23,16 @@ import neon_sync
 import mis_flows as mf
 import app_mis
 import service_manager
+import intake_queue as iq
+import intake_worker
+import vba_generator
 
 DB_PATH = df.DEFAULT_DB          # one path, defined once, in dump_flows
 
 st.set_page_config(page_title="Sarthi Dump Processor", layout="wide")
 df.init_db(DB_PATH)
 mf.init_db(DB_PATH)               # adds the mis_* tables; touches nothing existing
+iq.init_db(DB_PATH)               # adds the intake_queue table for the VBA watcher
 
 # Launching the app IS launching the system. The receiver and the MIS poller come
 # up behind it as one detached background process. PID-locked, so Streamlit's
@@ -66,6 +70,7 @@ ss.setdefault("steps", [])
 ss.setdefault("mis_sel", None)       # selected MIS report (for Configure MIS)
 ss.setdefault("mis_steps_key", None)
 ss.setdefault("mis_steps", [])
+ss.setdefault("vba_code", "")
 
 
 def goto(screen, sel=None, mis_sel=None):
@@ -173,7 +178,7 @@ def recognition_builder(key):
 with st.sidebar:
     st.markdown("### ◈ Dump Processor")
     st.caption("Sarthi · receiver")
-    NAV = ["Overview", "Dump types", "MIS reports", "Run history", "MIS history",
+    NAV = ["Overview", "Dump types", "Intake queue", "VBA generator", "MIS reports", "Run history", "MIS history",
            "Neon catalog", "Services", "Settings"]
     # Configure screens are sub-screens — keep the nav on their parent while editing
     _PARENT = {"Configure": "Dump types", "Configure MIS": "MIS reports"}
@@ -448,6 +453,91 @@ elif ss.screen == "Configure":
             "when": r["finished_at"], "batch": r["batch_id"], "result": r["status"],
             "steps": ", ".join(f"{x['step']}:{x['status']}" for x in json.loads(r["steps_json"] or "[]")) or "—",
         } for r in rr]), use_container_width=True, hide_index=True)
+
+# ===========================================================================
+# VBA GENERATOR  (the app writes the Outlook watcher)
+# ===========================================================================
+elif ss.screen == "VBA generator":
+    st.title("VBA generator")
+    st.caption("The app writes the Outlook watcher from your dump types. Each feed's "
+               "sender/subject rules become match logic; the VBA just catches the "
+               "mail, saves the attachment, and creates a task here. Change routing "
+               "in Dump types, regenerate, paste into Outlook once.")
+
+    types = df.list_dump_types(DB_PATH)
+    enabled = [t for t in types if t.get("enabled")]
+    st.write(f"**{len(enabled)}** enabled feed(s) will be written into the module.")
+
+    with st.expander("Paths the VBA will use", expanded=False):
+        py = st.text_input("Python executable", value=vba_generator.DEFAULT_PYTHON)
+        runner = st.text_input("run_direct.py path", value=vba_generator.DEFAULT_RUNNER)
+        drop = st.text_input("Drop folder (VBA saves attachments here)",
+                             value=vba_generator.DEFAULT_DROP)
+        logp = st.text_input("VBA log file", value=vba_generator.DEFAULT_LOG)
+
+    # feeds with no translatable rule can't be watched — surface them
+    unwatchable = []
+    for t in enabled:
+        if vba_generator._rules_to_vba(t.get("recognition_json") or "") == "False":
+            unwatchable.append(t["key"])
+    if unwatchable:
+        st.warning("These feeds have no sender/subject rules the VBA can match, so "
+                   "they'll be skipped: " + ", ".join(unwatchable) +
+                   ". Add identifier rules on the Dump types screen.")
+
+    if st.button("Generate VBA", type="primary"):
+        code = vba_generator.generate(python_exe=py, runner=runner,
+                                      drop_folder=drop, log_path=logp, db_path=DB_PATH)
+        ss.vba_code = code
+
+    if ss.get("vba_code"):
+        st.download_button("Download SarthiDirectReceiver.bas", ss.vba_code,
+                           file_name="SarthiDirectReceiver.bas", type="primary")
+        st.code(ss.vba_code, language="vb")
+        st.markdown("**Paste it in:** Outlook → Alt+F11 → replace the "
+                    "`SarthiDirectReceiver` module → copy the two routines at the "
+                    "bottom into `ThisOutlookSession` → save → restart Outlook.")
+
+# ===========================================================================
+# INTAKE QUEUE  (mail caught by the Outlook VBA watcher)
+# ===========================================================================
+elif ss.screen == "Intake queue":
+    st.title("Intake queue")
+    st.caption("Mail the Outlook watcher caught, waiting to be processed. The VBA "
+               "fires on new mail, saves the attachment, and drops a job here; the "
+               "intake worker drains it into the dump flows. No polling, no second "
+               "Outlook connection.")
+    c = iq.counts(DB_PATH)
+    m = st.columns(4)
+    m[0].metric("Queued", c.get("queued", 0))
+    m[1].metric("Done", c.get("done", 0))
+    m[2].metric("Failed", c.get("failed", 0))
+    last = iq.last_activity(DB_PATH)
+    m[3].metric("Last mail", (last or "—")[-8:] if last else "—")
+
+    b1, b2, b3 = st.columns([1, 1, 3])
+    if b1.button("Process now", type="primary"):
+        with st.spinner("Draining the intake queue..."):
+            n = intake_worker.one_pass(DB_PATH)
+        st.success("Pass complete.")
+        st.rerun()
+    if b2.button("Requeue stale"):
+        n = iq.release_stale(30, db_path=DB_PATH)
+        st.success(f"Requeued {n}.")
+        st.rerun()
+
+    flt = st.selectbox("Show", ["all", "queued", "failed", "done"])
+    jobs = iq.list_jobs(200, status=None if flt == "all" else flt, db_path=DB_PATH)
+    if not jobs:
+        st.info("No jobs.")
+    else:
+        import pandas as _pd
+        st.dataframe(_pd.DataFrame([{
+            "id": j["id"], "when": j["created_at"], "status": j["status"],
+            "type": j["dump_type"] or "(by rules)", "sender": j["sender"],
+            "subject": j["subject"], "file": (j["file_path"] or "").split("\\")[-1],
+            "tries": j["attempts"], "note": j["message"] or "",
+        } for j in jobs]), use_container_width=True, hide_index=True)
 
 # ===========================================================================
 # MIS REPORTS  ·  CONFIGURE MIS  ·  MIS HISTORY

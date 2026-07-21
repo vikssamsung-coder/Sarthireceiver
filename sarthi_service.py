@@ -118,14 +118,23 @@ class Child:
 
 
 def main(argv):
-    ap = argparse.ArgumentParser(description="Sarthi services — receiver + MIS")
-    ap.add_argument("--no-receiver", action="store_true")
+    ap = argparse.ArgumentParser(description="Sarthi services — intake + MIS")
+    ap.add_argument("--poll-outlook", action="store_true",
+                    help="also run the legacy Outlook COM poller (sarthi_receiver). "
+                         "Off by default now that the VBA watcher enqueues via "
+                         "intake_queue — running the poller too re-introduces the "
+                         "second-COM-server collision with MIS.")
+    ap.add_argument("--no-intake", action="store_true",
+                    help="don't run the intake queue worker")
     ap.add_argument("--no-mis", action="store_true")
     ap.add_argument("--interval", type=int, default=60)
     a = ap.parse_args(argv)
 
     children = []
-    if not a.no_receiver:
+    if not a.no_intake:
+        children.append(Child("intake", ["intake_worker.py", "--watch",
+                                         "--interval", "10"]))
+    if a.poll_outlook:
         children.append(Child("receiver", ["sarthi_receiver.py", "--watch",
                                            "--interval", str(a.interval)]))
     if not a.no_mis:

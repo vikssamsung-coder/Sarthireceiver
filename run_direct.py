@@ -39,15 +39,36 @@ def main():
     ap.add_argument("--body", default="")
     ap.add_argument("--dump-type", default="", help="skip recognition and use this type")
     ap.add_argument("--batch-id", default="")
+    ap.add_argument("--entry-id", default="", help="Outlook EntryID, for dedupe")
+    ap.add_argument("--enqueue", action="store_true",
+                    help="just drop the job on intake_queue and return "
+                         "(the app's worker processes it) — this is what the VBA calls")
     ap.add_argument("--db", default=str(df.DEFAULT_DB))
     args = ap.parse_args()
 
     db = Path(args.db)
+    no_file = args.file.strip() in ("(none)", "", "none")
     src = Path(args.file)
-    if not src.exists():
+    if not no_file and not src.exists():
         print(f"FILE NOT FOUND: {src}")
         return 2
 
+    # ---- enqueue mode: the queue architecture --------------------------------
+    # The VBA watcher calls this. It returns immediately so Outlook is never
+    # blocked on processing; intake_worker (in the app) drains the queue.
+    if args.enqueue:
+        import intake_queue as iq
+        jid = iq.enqueue(file_path=("" if no_file else str(src)), subject=args.subject,
+                         sender=args.sender, body=args.body,
+                         dump_type=args.dump_type, entry_id=args.entry_id,
+                         source="vba", db_path=db)
+        if jid is None:
+            print("DUPLICATE: already queued (same EntryID) — skipped")
+        else:
+            print(f"QUEUED: job {jid} <- {'(no file)' if no_file else src.name}")
+        return 0
+
+    # ---- inline mode: process now (fallback / manual use) --------------------
     dt = args.dump_type.strip() or df.resolve(
         subject=args.subject, body=args.body, sender=args.sender,
         attachments=[src.name], db_path=db)
