@@ -161,10 +161,12 @@ def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
 '  edit the dump type in the app, regenerate, and paste over this module.
 '
 '  SETUP (once):
-'    1. Alt+F11 -> import/replace this module.
-'    2. Copy the two routines at the very bottom into ThisOutlookSession.
-'    3. Tools > References -> Microsoft Outlook nn.n Object Library.
-'    4. Trust Center -> enable macros; restart Outlook.
+'    1. Alt+F11. Right-click Modules > Insert > Module.
+'    2. Paste THIS ENTIRE FILE into that new module (NOT ThisOutlookSession).
+'    3. Open ThisOutlookSession; paste the 3 routines from the bottom of
+'       this file (remove the leading apostrophes).
+'    4. Tools > References -> tick Microsoft Outlook nn.n Object Library.
+'    5. Trust Center -> enable macros; save; restart Outlook.
 '====================================================================
 Option Explicit
 
@@ -173,19 +175,10 @@ Private Const RUNNER     As String = {_vqs(runner)}
 Private Const DROP_FOLDER As String = {_vqs(drop_folder)}
 Private Const INTAKE_LOG  As String = {_vqs(log_path)}
 
-Private WithEvents InboxItems As Outlook.Items
 
-
-Private Sub Application_Startup()
-    On Error Resume Next
-    Dim ns As Outlook.NameSpace
-    Set ns = Application.GetNamespace("MAPI")
-    Set InboxItems = ns.GetDefaultFolder(olFolderInbox).Items
-    WriteIntakeLog "watcher activated — {len(watchers)} feed(s)"
-End Sub
-
-
-Private Sub InboxItems_ItemAdd(ByVal Item As Object)
+' Called by ThisOutlookSession's ItemAdd event (see the bottom of this file).
+' All routing lives here; ThisOutlookSession just forwards the new-mail event.
+Public Sub RouteMail(ByVal Item As Object)
     On Error GoTo EH
     If TypeName(Item) <> "MailItem" Then Exit Sub
     Dim mail As Outlook.MailItem: Set mail = Item
@@ -203,7 +196,7 @@ Private Sub InboxItems_ItemAdd(ByVal Item As Object)
 {chr(10).join(calls) if calls else "    ' (no feeds configured)"}
     Exit Sub
 EH:
-    WriteIntakeLog "ERR ItemAdd: " & Err.Number & " | " & Err.Description
+    WriteIntakeLog "ERR RouteMail: " & Err.Number & " | " & Err.Description
 End Sub
 '''
 
@@ -301,7 +294,12 @@ End Sub
     footer = '''
 
 '====================================================================
-'  COPY THESE TWO INTO  ThisOutlookSession  (not this module):
+'  IMPORTANT: this whole block goes in a  MODULE  (Insert > Module),
+'  NOT in ThisOutlookSession. The line at the very top
+'  (Attribute VB_Name = ...) is only valid in a standard module.
+'
+'  Then paste ONLY the three lines below into ThisOutlookSession
+'  (remove the leading apostrophes):
 '====================================================================
 '
 '   Private WithEvents inboxItems As Outlook.Items
@@ -313,17 +311,10 @@ End Sub
 '   End Sub
 '
 '   Private Sub inboxItems_ItemAdd(ByVal Item As Object)
-'       SarthiDirectReceiver.RouteFromSession Item
+'       SarthiDirectReceiver.RouteMail Item
 '   End Sub
 '
-'====================================================================
-'  (RouteFromSession lets the module own the logic; ThisOutlookSession
-'   just forwards the event.)
-Public Sub RouteFromSession(ByVal Item As Object)
-    On Error Resume Next
-    InboxItems_ItemAdd Item
-End Sub
-'''
+'===================================================================='''
 
     return header + "\n".join(watchers) + core + footer
 
