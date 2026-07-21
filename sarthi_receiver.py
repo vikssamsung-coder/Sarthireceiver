@@ -121,12 +121,19 @@ def _get_folder(ns, mailbox, folder):
 
 
 def process_once(mailbox, folder, scan=50, db_path=df.DEFAULT_DB, seen_path=SEEN_DB, log=print) -> int:
-    import win32com.client  # pywin32, Windows only
-    ns = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI")
-    inbox = _get_folder(ns, mailbox, folder)
-    items = inbox.Items
-    items.Sort("[ReceivedTime]", True)   # newest first
+    # Outlook is a single-instance COM server. The MIS mailer is a SECOND process
+    # that also reaches for it; overlapping access throws 0x80080005 for both.
+    # outlook_com serializes the two (cross-process lock) and gives each a clean
+    # COM apartment. Everything Outlook-touching stays inside this 'with'.
+    import outlook_com
+    with outlook_com.outlook_namespace("receiver") as ns:
+        inbox = _get_folder(ns, mailbox, folder)
+        items = inbox.Items
+        items.Sort("[ReceivedTime]", True)   # newest first
+        return _scan_items(items, scan, db_path, seen_path, log)
 
+
+def _scan_items(items, scan, db_path, seen_path, log) -> int:
     handled = 0
     n = min(scan, items.Count)
     for i in range(1, n + 1):

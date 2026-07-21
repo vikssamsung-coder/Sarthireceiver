@@ -32,19 +32,19 @@ def send_report(to, subject, body, attachment=None) -> str | None:
             attachment = None
 
     try:
-        import win32com.client
+        import outlook_com
     except ImportError:
-        return "pywin32 not available — cannot send"
+        return "outlook_com module missing"
 
     try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
-        mail = outlook.CreateItem(0)
-        mail.To = "; ".join(to)
-        mail.Subject = subject
-        mail.Body = body
-        if attachment:
-            mail.Attachments.Add(str(Path(attachment).resolve()))
-        mail.Send()
+        with outlook_com.outlook_app("mis-mailer") as outlook:
+            mail = outlook.CreateItem(0)
+            mail.To = "; ".join(to)
+            mail.Subject = subject
+            mail.Body = body
+            if attachment:
+                mail.Attachments.Add(str(Path(attachment).resolve()))
+            mail.Send()
         return None
     except Exception as e:
         return f"Outlook send failed: {e}"
