@@ -134,25 +134,21 @@ def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
 
     watchers, calls = [], []
     skipped_norules = []
-    skipped_pmd = []
     nostep_warn = []
     for t in types:
         key = t["key"]
-        origin = (t.get("origin") or "").lower()
 
-        # PMD feeds arrive via PMD's own label routing, NOT via Outlook matching.
-        # The watcher must not try to catch them.
-        if origin == "pmd":
-            skipped_pmd.append(key)
-            continue
-
+        # Both PMD and direct dumps arrive via Outlook — PMD with prefilled/
+        # standard details, direct with feed-specific keywords. Either way it's
+        # the recognition rules that match them, so we watch any feed that HAS
+        # rules, regardless of origin. A feed with no rules can't be matched.
         expr = _rules_to_vba(t.get("recognition_json") or "")
         if expr == "False":
             skipped_norules.append(key)
             continue
 
-        # A direct feed with rules but no steps will catch mail and then fail in
-        # the flow. Flag it so it's visible in the generated header.
+        # A feed with rules but no steps will catch mail and then fail in the
+        # flow. Flag it so it's visible in the generated header.
         try:
             n_steps = len(df.get_steps(key, db_path) if db_path else df.get_steps(key))
         except Exception:
@@ -167,10 +163,8 @@ def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     notes = []
-    if skipped_pmd:
-        notes.append("PMD feeds (routed by PMD, not watched): " + ", ".join(skipped_pmd))
     if skipped_norules:
-        notes.append("skipped, no rules: " + ", ".join(skipped_norules))
+        notes.append("skipped, no rules (add rules to watch): " + ", ".join(skipped_norules))
     if nostep_warn:
         notes.append("WATCHED BUT NO STEPS (will fail in flow): " + ", ".join(nostep_warn))
     skip_note = ""
