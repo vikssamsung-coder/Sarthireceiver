@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -47,6 +48,28 @@ LOCK_TIMEOUT = int(os.environ.get("SARTHI_OUTLOOK_LOCK_TIMEOUT", "300"))  # 5 mi
 LOCK_STALE = int(os.environ.get("SARTHI_OUTLOOK_LOCK_STALE", "600"))      # 10 min
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except ImportError:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
+
+def _read_lock() -> tuple[int, str]:
+    try:
+        parts = LOCK_PATH.read_text(encoding="utf-8").split()
+        return int(parts[1]), parts[3]
+    except (OSError, ValueError, IndexError):
+        return 0, ""
+
+
 # ---------------------------------------------------------------------------
 # cross-process lock (Windows-safe: exclusive create, no fcntl needed)
 # ---------------------------------------------------------------------------
@@ -54,17 +77,21 @@ LOCK_STALE = int(os.environ.get("SARTHI_OUTLOOK_LOCK_STALE", "600"))      # 10 m
 def _cross_process_lock(who: str):
     LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd = None
+    token = uuid.uuid4().hex
     deadline = time.time() + LOCK_TIMEOUT
     while True:
-        # break a stale lock (a process that died holding it)
+        # Break a stale lock only when its owner is dead. Age alone is unsafe:
+        # the receiver may legitimately process a large flow for >10 minutes.
         try:
             if LOCK_PATH.exists() and time.time() - LOCK_PATH.stat().st_mtime > LOCK_STALE:
-                LOCK_PATH.unlink(missing_ok=True)
+                owner_pid, _owner_token = _read_lock()
+                if not _pid_alive(owner_pid):
+                    LOCK_PATH.unlink(missing_ok=True)
         except Exception:
             pass
         try:
             fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, f"{who} {os.getpid()} {time.time():.0f}".encode())
+            os.write(fd, f"{who} {os.getpid()} {time.time():.0f} {token}".encode())
             break
         except FileExistsError:
             if time.time() > deadline:
@@ -78,7 +105,11 @@ def _cross_process_lock(who: str):
         try:
             if fd is not None:
                 os.close(fd)
-            LOCK_PATH.unlink(missing_ok=True)
+            # Never remove a successor's lock if this lock was manually/stale
+            # removed and another process acquired the same path meanwhile.
+            _owner_pid, owner_token = _read_lock()
+            if owner_token == token:
+                LOCK_PATH.unlink(missing_ok=True)
         except Exception:
             pass
 

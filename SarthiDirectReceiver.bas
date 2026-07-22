@@ -31,6 +31,16 @@ Private Const PYTHON      As String = "python"      ' or full path to python.exe
 ' --------------------------------------------------------------------
 
 
+Private Function SafeFileName(ByVal value As String) As String
+    Dim bad As Variant, ch As Variant
+    bad = Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+    SafeFileName = value
+    For Each ch In bad
+        SafeFileName = Replace(SafeFileName, CStr(ch), "_")
+    Next ch
+End Function
+
+
 ' Resolve the real SMTP address. Exchange senders otherwise arrive as an
 ' X.500 DN (/o=.../cn=...), which won't match "sender is one of a@bigul.co".
 Public Function SenderSMTP(ByVal mail As Outlook.MailItem) As String
@@ -62,7 +72,7 @@ End Sub
 Private Sub RouteMail(ByVal Item As Outlook.MailItem, ByVal dumpType As String)
     On Error GoTo done
     Dim att As Outlook.Attachment, fpath As String, cmd As String
-    Dim smtp As String, entryId As String
+    Dim smtp As String, entryId As String, entryKey As String
 
     If Item.Class <> olMail Then Exit Sub
     If Item.Attachments.Count = 0 Then Exit Sub
@@ -72,7 +82,13 @@ Private Sub RouteMail(ByVal Item As Outlook.MailItem, ByVal dumpType As String)
     entryId = Item.EntryID           ' stable id -> the queue dedupes on this
 
     For Each att In Item.Attachments
-        fpath = DROP_FOLDER & att.FileName
+        ' Each attachment is its own durable job. Reusing only EntryID caused
+        ' attachment 2+ to be rejected by the queue's unique index. The suffix
+        ' still dedupes repeat ItemAdd/routing calls for the same attachment.
+        entryKey = entryId & ":" & CStr(att.Index)
+        fpath = DROP_FOLDER & Format(Item.ReceivedTime, "yyyymmdd_hhnnss") & _
+                "_" & Right$(entryId, 12) & "_" & CStr(att.Index) & "_" & _
+                SafeFileName(att.FileName)
         att.SaveAsFile fpath
 
         ' --enqueue: drop the job and return. The app's worker processes it.
@@ -80,8 +96,9 @@ Private Sub RouteMail(ByVal Item As Outlook.MailItem, ByVal dumpType As String)
               "--file """ & fpath & """ " & _
               "--subject """ & Replace(Item.Subject, """", "'") & """ " & _
               "--sender """ & smtp & """ " & _
-              "--entry-id """ & entryId & """"
-        If Len(dumpType) > 0 Then cmd = cmd & " --dump-type " & dumpType
+              "--entry-id """ & entryKey & """"
+        If Len(dumpType) > 0 Then cmd = cmd & " --dump-type """ & _
+              Replace(dumpType, """", "'") & """"
 
         Shell "cmd /c " & cmd, vbHide
     Next

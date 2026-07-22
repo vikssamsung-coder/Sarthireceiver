@@ -104,12 +104,14 @@ def claim_next(db_path: Path = DEFAULT_DB):
         return dict(row)
     except sqlite3.Error:
         c.rollback()
-        return None
+        raise
     finally:
         c.close()
 
 
 def finish(job_id, status, message="", db_path: Path = DEFAULT_DB) -> None:
+    if status not in {"done", "failed", "queued", "claimed"}:
+        raise ValueError(f"invalid intake status: {status}")
     with _conn(db_path) as c:
         c.execute("UPDATE intake_queue SET status=?, message=? WHERE id=?",
                   (status, (message or "")[:2000], int(job_id)))
@@ -120,7 +122,7 @@ def release_stale(minutes=30, db_path: Path = DEFAULT_DB) -> int:
     should retry). Distinct from MIS, where a stale claim fails."""
     with _conn(db_path) as c:
         cur = c.execute(
-            "UPDATE intake_queue SET status='queued', "
+            "UPDATE intake_queue SET status='queued', claimed_at=NULL, "
             "message=COALESCE(message,'')||' [requeued: stale claim]' "
             "WHERE status='claimed' AND claimed_at IS NOT NULL "
             "AND (julianday('now','localtime')-julianday(claimed_at))*1440 > ?",

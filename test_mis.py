@@ -268,4 +268,5 @@ check("failed", r["status"] == "failed")
 check("no output path", not r["output_path"])
 
 print(f"\n{ok} passed, {bad} failed")
-sys.exit(1 if bad else 0)
+if __name__ == "__main__":
+    sys.exit(1 if bad else 0)

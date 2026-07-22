@@ -64,7 +64,9 @@ def mark_seen(seen_path, entry_id, dump_type, subject):
 def handle_email(entry_id, subject, body, sender, saved_paths, *,
                  db_path=df.DEFAULT_DB, seen_path=SEEN_DB, log=print):
     """Given an email's fields and its already-saved attachment paths, resolve the
-    dump type and run its flow. Returns the dump_type key (or 'unknown'/'skip')."""
+    dump type and run its flow. Returns the dump_type key, or one of
+    'unknown'/'skip'/'failed'. Failed flows are deliberately not marked seen so
+    a corrected configuration can process the email on the next pass."""
     if is_seen(seen_path, entry_id):
         return "skip"
 
@@ -87,9 +89,12 @@ def handle_email(entry_id, subject, body, sender, saved_paths, *,
     ok, results = flow_engine.run_dump_flow(
         batch_id=batch, dump_type=dt, assembled_path=primary,
         subject=subject, sender_email=sender, db_path=db_path, log=log)
-    mark_seen(seen_path, entry_id, dt, subject)
-    log(f"{dt}: {'ok' if ok else 'failed'} — {results}")
-    return dt
+    if ok:
+        mark_seen(seen_path, entry_id, dt, subject)
+        log(f"{dt}: ok — {results}")
+        return dt
+    log(f"{dt}: failed — left unprocessed for retry — {results}")
+    return "failed"
 
 
 # ---- Outlook reading (Windows only) ---------------------------------------
@@ -149,18 +154,23 @@ def _scan_items(items, scan, db_path, seen_path, log) -> int:
             body = mail.Body or ""
             sender = _smtp(mail)
 
-            saved = []
-            if mail.Attachments.Count > 0:
-                tmp = Path(tempfile.mkdtemp(prefix="sarthi_"))
+            # TemporaryDirectory removes saved Outlook attachments after the
+            # synchronous flow completes.  The previous mkdtemp path leaked one
+            # directory for every processed message.
+            with tempfile.TemporaryDirectory(prefix="sarthi_") as tmp_name:
+                saved = []
+                tmp = Path(tmp_name)
                 for a in mail.Attachments:
-                    p = tmp / a.FileName
+                    # Outlook filenames occasionally include path components;
+                    # only the final name is safe inside our temporary folder.
+                    p = tmp / Path(str(a.FileName)).name
                     a.SaveAsFile(str(p))
                     saved.append(p)
 
-            res = handle_email(entry_id, subject, body, sender, saved,
-                               db_path=db_path, seen_path=seen_path, log=log)
-            if res not in ("skip", "unknown"):
-                handled += 1
+                res = handle_email(entry_id, subject, body, sender, saved,
+                                   db_path=db_path, seen_path=seen_path, log=log)
+                if res not in ("skip", "unknown", "failed"):
+                    handled += 1
         except Exception as e:
             log(f"error on item {i}: {e}")
     return handled

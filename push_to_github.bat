@@ -14,10 +14,12 @@ if errorlevel 1 (
 )
 
 REM keep caches and local data out of the repo
-> .gitignore echo __pycache__/
->>.gitignore echo *.pyc
->>.gitignore echo *.sqlite3
->>.gitignore echo .streamlit/secrets.toml
+if not exist .gitignore (
+  > .gitignore echo __pycache__/
+  >>.gitignore echo *.pyc
+  >>.gitignore echo *.sqlite3
+  >>.gitignore echo .streamlit/secrets.toml
+)
 
 if not exist ".git" (
   git init

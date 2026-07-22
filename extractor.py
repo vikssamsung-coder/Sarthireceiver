@@ -62,7 +62,14 @@ def _safe_members(z: zipfile.ZipFile, dest: Path):
         if m.is_dir():
             continue
         target = (dest / m.filename).resolve()
-        if str(target).startswith(str(dest)):
+        # A string-prefix check is unsafe: ``C:\\data_evil`` starts with
+        # ``C:\\data``.  Path.relative_to performs a component-aware check on
+        # every supported Python version used by this project.
+        try:
+            target.relative_to(dest)
+        except ValueError:
+            continue
+        else:
             yield m, target
 
 
@@ -85,6 +92,8 @@ def extract_dump(src_path, dest_folder, log=print) -> dict:
     Returns {kind, primary (Path|None), files [Path...], saved_folder}.
     """
     src = Path(src_path)
+    if not src.is_file():
+        raise FileNotFoundError(f"input dump is not a file: {src}")
     dest = Path(dest_folder)
     dest.mkdir(parents=True, exist_ok=True)
     kind = detect_kind(src)
@@ -99,6 +108,8 @@ def extract_dump(src_path, dest_folder, log=print) -> dict:
                 placed.append(target)
         data = [f for f in placed if f.suffix.lower() in DATA_EXTS] or placed
         primary = _pick_primary(data)
+        if primary is None:
+            raise ValueError(f"archive contains no files: {src}")
         log(f"extracted zip -> {len(placed)} file(s); input = {primary.name if primary else 'none'}")
         return {"kind": "zip", "primary": primary, "files": data, "saved_folder": dest}
 

@@ -468,6 +468,18 @@ elif ss.screen == "VBA generator":
     enabled = [t for t in types if t.get("enabled")]
     st.write(f"**{len(enabled)}** enabled feed(s) will be written into the module.")
 
+    validation = vba_generator.validation_report(DB_PATH)
+    with st.expander("Generator validation report", expanded=True):
+        st.dataframe(pd.DataFrame(validation["feeds"]), use_container_width=True,
+                     hide_index=True)
+        for warning in validation["warnings"]:
+            st.warning(warning)
+    blocked = [r["key"] for r in validation["feeds"]
+               if r["state"] not in ("Active and routable", "Disabled")]
+    if blocked:
+        st.error("These active feeds will not be generated until their configuration "
+                 "is complete: " + ", ".join(blocked))
+
     with st.expander("Paths the VBA will use", expanded=False):
         py = st.text_input("Python executable", value=vba_generator.DEFAULT_PYTHON)
         runner = st.text_input("run_direct.py path", value=vba_generator.DEFAULT_RUNNER)
@@ -507,7 +519,7 @@ elif ss.screen == "VBA generator":
             st.markdown("**Paste it in:** Outlook → Alt+F11 → double-click "
                         "**ThisOutlookSession** → select all (Ctrl+A), delete, paste "
                         "this whole block → **Debug ▸ Compile** → click inside "
-                        "`Application_Startup`, press **F5** once → send a test mail. "
+                        "`InitializeInboxWatcher`, press **F5** once → send a test mail. "
                         "Delete any old `SarthiDirectReceiver` module first.")
         else:
             st.markdown("**Paste it in:** Outlook → Alt+F11 → replace the "

@@ -16,12 +16,16 @@ if errorlevel 1 (
 REM make sure the registry folder exists
 if not exist "D:\Sarthi\multipart_buffer" mkdir "D:\Sarthi\multipart_buffer"
 
-REM install dependencies the first time
-python -m streamlit version >nul 2>nul
+REM install the complete dependency set when anything is missing
+python -c "import streamlit,pandas,openpyxl,psutil,psycopg,win32com.client" >nul 2>nul
 if errorlevel 1 (
-  echo First run - installing dependencies...
+  echo Installing missing dependencies...
   python -m pip install --upgrade pip
-  python -m pip install streamlit pandas "psycopg[binary]"
+  python -m pip install -r requirements.txt
+  if errorlevel 1 (
+    echo Dependency installation failed.
+    pause & exit /b 1
+  )
 )
 
 echo Starting the app... a browser tab will open.

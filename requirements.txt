@@ -1,0 +1,7 @@
+pandas>=2.2
+openpyxl>=3.1
+psutil>=5.9
+psycopg[binary]>=3.1
+streamlit>=1.40
+tomli>=2.0; python_version < "3.11"
+pywin32>=306; platform_system == "Windows"

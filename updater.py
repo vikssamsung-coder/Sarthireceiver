@@ -86,6 +86,8 @@ def update_from_github(dest_dir, token: str = "", log=print) -> list:
     data = _fetch_zip(token)
     zf = zipfile.ZipFile(io.BytesIO(data))
 
+    dest_root = Path(dest_dir).resolve()
+    dest_root.mkdir(parents=True, exist_ok=True)
     written = []
     for m in zf.infolist():
         if m.is_dir():
@@ -98,7 +100,12 @@ def update_from_github(dest_dir, token: str = "", log=print) -> list:
             continue
         if any(p in SKIP_DIRS for p in rel.parts):
             continue
-        target = Path(dest_dir) / rel
+        target = (dest_root / rel).resolve()
+        try:
+            target.relative_to(dest_root)
+        except ValueError:
+            log(f"skipped unsafe archive path: {m.filename}")
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(m) as src, open(target, "wb") as out:
             shutil.copyfileobj(src, out)

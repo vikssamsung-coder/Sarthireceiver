@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -24,26 +25,50 @@ import dump_flows as df
 import extractor
 
 
-def _default_run_python(batch_id, dump_type, trigger_name, script_path, extra_args, log):
+STEP_TIMEOUT_SEC = int(os.environ.get("SARTHI_FLOW_STEP_TIMEOUT", "1800"))
+
+
+def _default_run_python(batch_id, dump_type, trigger_name, script_path, extra_args,
+                        log, working_dir=None):
+    if not Path(script_path).is_file():
+        log(f"  target not found: {script_path}")
+        return False
     cmd = [sys.executable, str(script_path)] + list(extra_args or [])
     log(f"run python: {' '.join(cmd)}")
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        p = subprocess.run(
+            cmd, cwd=working_dir or str(Path(script_path).parent),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=STEP_TIMEOUT_SEC,
+        )
         if p.returncode != 0:
             log(f"  exit {p.returncode}: {p.stderr[-400:]}")
         return p.returncode == 0
+    except subprocess.TimeoutExpired:
+        log(f"  timed out after {STEP_TIMEOUT_SEC}s")
+        return False
     except Exception as e:
         log(f"  error: {e}")
         return False
 
 
-def _default_run_bat(batch_id, final_package_name, bat_path, log):
+def _default_run_bat(batch_id, final_package_name, bat_path, log, working_dir=None):
+    if not Path(bat_path).is_file():
+        log(f"  target not found: {bat_path}")
+        return False
     log(f"run bat: {bat_path}")
     try:
-        p = subprocess.run([str(bat_path)], capture_output=True, text=True)
+        p = subprocess.run(
+            [str(bat_path)], cwd=working_dir or str(Path(bat_path).parent),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=STEP_TIMEOUT_SEC, shell=(os.name == "nt"),
+        )
         if p.returncode != 0:
             log(f"  exit {p.returncode}: {p.stderr[-400:]}")
         return p.returncode == 0
+    except subprocess.TimeoutExpired:
+        log(f"  timed out after {STEP_TIMEOUT_SEC}s")
+        return False
     except Exception as e:
         log(f"  error: {e}")
         return False
@@ -57,33 +82,44 @@ def run_dump_flow(batch_id, dump_type, assembled_path, subject=None, sender_emai
 
     # 1) SAVE + EXTRACT
     save_folder = None
-    saved_path = Path(assembled_path)
+    has_input = bool(str(assembled_path or "").strip())
+    saved_path = Path(assembled_path) if has_input else None
     extracted_files = []
     try:
         save_folder = df.get_save_folder(dump_type, db_path=db_path)
-        if save_folder and not dry_run:
+        if has_input and not Path(assembled_path).is_file() and not dry_run:
+            raise FileNotFoundError(f"input dump is not a file: {assembled_path}")
+        if save_folder and has_input and not dry_run:
             res = extractor.extract_dump(assembled_path, save_folder, log=log)
             if res.get("primary"):
                 saved_path = Path(res["primary"])
             else:
-                saved_path = Path(save_folder) / Path(assembled_path).name
+                raise ValueError("extractor did not return a primary input file")
             extracted_files = [str(f) for f in res.get("files", [])]
-        elif save_folder:
+        elif save_folder and has_input:
             saved_path = Path(save_folder) / Path(assembled_path).name
     except Exception as e:
-        log(f"extract/save into '{save_folder}' failed: {e}")
+        message = f"extract/save into '{save_folder}' failed: {e}"
+        log(message)
+        try:
+            df.record_run(batch_id, dump_type, saved_path, "failed", [],
+                          message=message, started_at=started_at, db_path=db_path)
+        except Exception as record_error:
+            log(f"could not record confirmation: {record_error}")
+        return False, []
 
     context = {
-        "batch_id": batch_id, "assembled_path": str(saved_path),
+        "batch_id": batch_id, "assembled_path": str(saved_path) if saved_path else "",
         "save_folder": str(save_folder or ""), "subject": str(subject or ""),
         "sender_email": str(sender_email or ""), "dump_type": dump_type,
-        "leads_dir": str(leads_dir), "final_package_name": Path(saved_path).name,
+        "leads_dir": str(leads_dir),
+        "final_package_name": saved_path.name if saved_path else "",
         "extracted_files": ";".join(extracted_files),
     }
 
     def _confirm(status, results, message=""):
         try:
-            df.record_run(batch_id, dump_type, saved_path, status, results,
+            df.record_run(batch_id, dump_type, saved_path or "", status, results,
                           message=message, started_at=started_at, db_path=db_path)
         except Exception as e:
             log(f"could not record confirmation: {e}")
@@ -101,9 +137,6 @@ def run_dump_flow(batch_id, dump_type, assembled_path, subject=None, sender_emai
         return False, []
 
     # 2) RUN
-    rp = run_python or (lambda b, d, t, s, a: _default_run_python(b, d, t, s, a, log))
-    rb = run_bat or (lambda b, f, p: _default_run_bat(b, f, p, log))
-
     results = []
     for s in steps:
         name, kind, target = s["step_name"], s["kind"], s["target_path"]
@@ -111,8 +144,16 @@ def run_dump_flow(batch_id, dump_type, assembled_path, subject=None, sender_emai
         if dry_run:
             results.append({"step": name, "status": "dry-run"})
             continue
-        ok = rb(batch_id, context["final_package_name"], target) if kind == "bat" \
-            else rp(batch_id, dump_type, name, target, args)
+        if kind == "bat":
+            ok = (run_bat(batch_id, context["final_package_name"], target)
+                  if run_bat else _default_run_bat(
+                      batch_id, context["final_package_name"], target, log,
+                      working_dir=s.get("working_dir")))
+        else:
+            ok = (run_python(batch_id, dump_type, name, target, args)
+                  if run_python else _default_run_python(
+                      batch_id, dump_type, name, target, args, log,
+                      working_dir=s.get("working_dir")))
         results.append({"step": name, "status": "ok" if ok else "failed"})
         if not ok and on_failure == "stop":
             log(f"step '{name}' failed (stop). halting flow for {batch_id}.")
