@@ -191,7 +191,7 @@ with st.sidebar:
 
     st.divider()
     if SVC.get("running"):
-        st.markdown('<span class="pill on">● Receiver &amp; MIS running</span>',
+        st.markdown('<span class="pill on">● Intake &amp; MIS running</span>',
                     unsafe_allow_html=True)
         st.caption(f"since {SVC.get('started_at') or '—'}")
     else:
@@ -485,18 +485,34 @@ elif ss.screen == "VBA generator":
                    "they'll be skipped: " + ", ".join(unwatchable) +
                    ". Add identifier rules on the Dump types screen.")
 
+    aio = st.checkbox("All-in-one (single ThisOutlookSession block — easiest, "
+                      "no separate module)", value=True,
+                      help="Puts everything in ThisOutlookSession. Paste the whole "
+                           "block there, compile, F5 Application_Startup. Avoids "
+                           "module-naming problems.")
     if st.button("Generate VBA", type="primary"):
         code = vba_generator.generate(python_exe=py, runner=runner,
-                                      drop_folder=drop, log_path=logp, db_path=DB_PATH)
+                                      drop_folder=drop, log_path=logp, db_path=DB_PATH,
+                                      all_in_one=aio)
         ss.vba_code = code
+        ss.vba_aio = aio
 
     if ss.get("vba_code"):
-        st.download_button("Download SarthiDirectReceiver.bas", ss.vba_code,
-                           file_name="SarthiDirectReceiver.bas", type="primary")
+        fname = ("ThisOutlookSession.txt" if ss.get("vba_aio")
+                 else "SarthiDirectReceiver.bas")
+        st.download_button(f"Download {fname}", ss.vba_code,
+                           file_name=fname, type="primary")
         st.code(ss.vba_code, language="vb")
-        st.markdown("**Paste it in:** Outlook → Alt+F11 → replace the "
-                    "`SarthiDirectReceiver` module → copy the two routines at the "
-                    "bottom into `ThisOutlookSession` → save → restart Outlook.")
+        if ss.get("vba_aio"):
+            st.markdown("**Paste it in:** Outlook → Alt+F11 → double-click "
+                        "**ThisOutlookSession** → select all (Ctrl+A), delete, paste "
+                        "this whole block → **Debug ▸ Compile** → click inside "
+                        "`Application_Startup`, press **F5** once → send a test mail. "
+                        "Delete any old `SarthiDirectReceiver` module first.")
+        else:
+            st.markdown("**Paste it in:** Outlook → Alt+F11 → replace the "
+                        "`SarthiDirectReceiver` module → copy the routines at the "
+                        "bottom into `ThisOutlookSession` → save → restart Outlook.")
 
 # ===========================================================================
 # INTAKE QUEUE  (mail caught by the Outlook VBA watcher)
