@@ -46,6 +46,12 @@ def _result(status: str, code: int, *, cleanup: Path | None = None, **details) -
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", default="", help="attachment the watcher saved")
+    ap.add_argument("--source-url", default="",
+                    help="OneDrive/SharePoint file link when no local attachment exists")
+    ap.add_argument("--cloud-root", default="",
+                    help="local synced OneDrive root used to resolve a private link")
+    ap.add_argument("--original-filename", default="",
+                    help="display/download name supplied by the Outlook link")
     ap.add_argument("--job-file", default="",
                     help="UTF-8 JSON job; avoids passing mail metadata through cmd.exe")
     ap.add_argument("--subject", default="")
@@ -70,6 +76,9 @@ def main():
         except Exception as exc:
             return _result("invalid_job", 3, message=str(exc), job_file=str(job_path))
         args.file = str(job.get("file") or "(none)")
+        args.source_url = str(job.get("source_url") or "")
+        args.cloud_root = str(job.get("cloud_root") or "")
+        args.original_filename = str(job.get("original_filename") or "")
         args.subject = str(job.get("subject") or "")
         args.sender = str(job.get("sender") or "")
         args.body = str(job.get("body") or "")
@@ -80,9 +89,9 @@ def main():
         if job.get("delete_after_read"):
             cleanup_job = job_path
 
-    if not args.file:
+    if not args.file and not args.source_url:
         return _result("invalid_input", 3, cleanup=cleanup_job,
-                       message="--file or --job-file is required")
+                       message="--file, --source-url, or --job-file is required")
 
     db = Path(args.db)
     no_file = args.file.strip() in ("(none)", "", "none")
@@ -99,7 +108,9 @@ def main():
         jid = iq.enqueue(file_path=("" if no_file else str(src)), subject=args.subject,
                          sender=args.sender, body=args.body,
                          dump_type=args.dump_type, entry_id=args.entry_id,
-                         source="vba", db_path=db)
+                         source="vba", source_url=args.source_url,
+                         cloud_root=args.cloud_root,
+                         original_filename=args.original_filename, db_path=db)
         if jid is None:
             return _result("duplicate", 2, cleanup=cleanup_job,
                            entry_id=args.entry_id)

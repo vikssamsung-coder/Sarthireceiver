@@ -19,6 +19,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import cloud_links
 import dump_flows as df
 import flow_engine
 import intake_queue as iq
@@ -34,6 +35,28 @@ def log(msg):
 def process_job(job, db_path: Path = DB_PATH) -> None:
     jid = int(job["id"])
     raw = (job.get("file_path") or "").strip()
+    source_url = (job.get("source_url") or "").strip()
+    downloaded = False
+
+    if not raw and source_url:
+        try:
+            cloud_root = job.get("cloud_root") or ""
+            materialized = cloud_links.resolve_synced_file(source_url, cloud_root)
+            if materialized is None:
+                materialized = cloud_links.materialize(
+                    source_url,
+                    cloud_root=cloud_root,
+                    suggested_name=job.get("original_filename") or "",
+                )
+                downloaded = True
+            raw = str(materialized)
+            log(f"job {jid} cloud link -> {materialized.name}")
+        except Exception as exc:
+            msg = f"cloud link unavailable: {exc}"
+            log(f"job {jid} FAILED — {msg}")
+            iq.finish(jid, "failed", msg, db_path=db_path)
+            return
+
     has_file = bool(raw)
     src = Path(raw) if has_file else None
 
@@ -53,6 +76,8 @@ def process_job(job, db_path: Path = DB_PATH) -> None:
                f"subject={job.get('subject')!r}) — check the feed's rules")
         log(f"job {jid} UNRESOLVED — {msg}")
         iq.finish(jid, "failed", msg, db_path=db_path)
+        if downloaded and src:
+            src.unlink(missing_ok=True)
         return
 
     batch = f"intake_{jid}_" + (src.stem if src else "nofile")
@@ -69,6 +94,8 @@ def process_job(job, db_path: Path = DB_PATH) -> None:
         msg = traceback.format_exc(limit=3)
         log(f"job {jid} CRASHED:\n{msg}")
         iq.finish(jid, "failed", msg, db_path=db_path)
+        if downloaded and src:
+            src.unlink(missing_ok=True)
         return
 
     if ok:
@@ -80,6 +107,8 @@ def process_job(job, db_path: Path = DB_PATH) -> None:
         detail = failed[0].get("step") if failed else "flow failed"
         iq.finish(jid, "failed", f"{dt}: {detail}", db_path=db_path)
         log(f"job {jid} FAILED -> {dt}: {detail}")
+    if downloaded and src:
+        src.unlink(missing_ok=True)
 
 
 def drain(db_path: Path = DB_PATH) -> int:

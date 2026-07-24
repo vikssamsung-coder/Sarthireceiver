@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS intake_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT NOT NULL DEFAULT 'vba',   -- 'vba' | 'manual' | 'poll'
     file_path   TEXT NOT NULL,                 -- the attachment the watcher saved
+    source_url  TEXT,                          -- OneDrive/SharePoint link
+    cloud_root  TEXT,                          -- matching local synced OneDrive root
+    original_filename TEXT,                    -- display/download name for cloud links
     subject     TEXT,
     sender      TEXT,
     body        TEXT,
@@ -53,6 +56,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_intake_entry ON intake_queue(entry_id)
     WHERE entry_id IS NOT NULL AND entry_id <> '';
 """
 
+_MIGRATIONS = {
+    "source_url": "ALTER TABLE intake_queue ADD COLUMN source_url TEXT",
+    "cloud_root": "ALTER TABLE intake_queue ADD COLUMN cloud_root TEXT",
+    "original_filename": "ALTER TABLE intake_queue ADD COLUMN original_filename TEXT",
+}
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -64,6 +73,11 @@ def _conn(db_path: Path = DEFAULT_DB) -> sqlite3.Connection:
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA busy_timeout=30000")
     c.executescript(_SCHEMA)
+    for col, ddl in _MIGRATIONS.items():
+        try:
+            c.execute(f"SELECT {col} FROM intake_queue LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute(ddl)
     return c
 
 
@@ -72,16 +86,20 @@ def init_db(db_path: Path = DEFAULT_DB) -> None:
 
 
 def enqueue(file_path, subject="", sender="", body="", dump_type="",
-            entry_id="", source="manual", db_path: Path = DEFAULT_DB):
+            entry_id="", source="manual", source_url="", cloud_root="",
+            original_filename="",
+            db_path: Path = DEFAULT_DB):
     """Add a job. Returns row id, or None if this entry_id was already queued
     (Outlook can fire ItemAdd more than once for the same mail — the unique
     index on entry_id collapses duplicates)."""
     with _conn(db_path) as c:
         cur = c.execute(
             "INSERT OR IGNORE INTO intake_queue"
-            "(source,file_path,subject,sender,body,dump_type,entry_id,status,created_at) "
-            "VALUES(?,?,?,?,?,?,?,'queued',?)",
-            (source, str(file_path), subject or "", sender or "", body or "",
+            "(source,file_path,source_url,cloud_root,original_filename,subject,sender,"
+            "body,dump_type,entry_id,status,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?)",
+            (source, str(file_path), source_url or "", cloud_root or "",
+             original_filename or "", subject or "", sender or "", body or "",
              dump_type or "", entry_id or "", _now()))
         return int(cur.lastrowid) if cur.rowcount else None
 

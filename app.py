@@ -486,6 +486,26 @@ elif ss.screen == "VBA generator":
         drop = st.text_input("Drop folder (VBA saves attachments here)",
                              value=vba_generator.DEFAULT_DROP)
         logp = st.text_input("VBA log file", value=vba_generator.DEFAULT_LOG)
+        source_label = st.selectbox(
+            "Email file source",
+            [
+                "Attachments only",
+                "Attachments, or OneDrive/SharePoint link",
+                "OneDrive/SharePoint links only",
+            ],
+            help="In the combined mode, a real attachment is preferred. The email "
+                 "link is used only when no supported file is attached.")
+        link_mode = {
+            "Attachments only": "attachments_only",
+            "Attachments, or OneDrive/SharePoint link": "attachments_or_links",
+            "OneDrive/SharePoint links only": "links_only",
+        }[source_label]
+        onedrive_root = st.text_input(
+            "Local synced OneDrive root",
+            value=vba_generator.DEFAULT_ONEDRIVE_ROOT,
+            disabled=link_mode == "attachments_only",
+            help="Preferred for private company links. The worker maps the SharePoint "
+                 "Documents path to this locally synced folder.")
 
     # feeds with no translatable rule can't be watched — surface them
     unwatchable = []
@@ -505,7 +525,8 @@ elif ss.screen == "VBA generator":
     if st.button("Generate VBA", type="primary"):
         code = vba_generator.generate(python_exe=py, runner=runner,
                                       drop_folder=drop, log_path=logp, db_path=DB_PATH,
-                                      all_in_one=aio)
+                                      all_in_one=aio, link_mode=link_mode,
+                                      onedrive_root=onedrive_root)
         ss.vba_code = code
         ss.vba_aio = aio
 
@@ -563,7 +584,9 @@ elif ss.screen == "Intake queue":
         st.dataframe(_pd.DataFrame([{
             "id": j["id"], "when": j["created_at"], "status": j["status"],
             "type": j["dump_type"] or "(by rules)", "sender": j["sender"],
-            "subject": j["subject"], "file": (j["file_path"] or "").split("\\")[-1],
+            "subject": j["subject"],
+            "file": ((j["file_path"] or "").split("\\")[-1]
+                     or j.get("original_filename") or "(OneDrive link)"),
             "tries": j["attempts"], "note": j["message"] or "",
         } for j in jobs]), use_container_width=True, hide_index=True)
 

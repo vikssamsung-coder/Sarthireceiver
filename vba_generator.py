@@ -42,6 +42,13 @@ DEFAULT_PYTHON = r"C:\Users\Vikrant.Dale\AppData\Local\Python\pythoncore-3.14-64
 DEFAULT_RUNNER = r"D:\dump_processor_app\run_direct.py"
 DEFAULT_DROP = r"D:\Sarthi\Incoming"
 DEFAULT_LOG = r"D:\Sarthi\vba_intake_log.txt"
+DEFAULT_ONEDRIVE_ROOT = r"C:\Users\Vikrant.Dale\OneDrive - Bonanza Group"
+
+LINK_MODES = {
+    "attachments_only",
+    "attachments_or_links",
+    "links_only",
+}
 
 
 def _vqs(s: str) -> str:
@@ -217,9 +224,13 @@ def validation_report(db_path=None) -> dict:
 def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
              drop_folder: str = DEFAULT_DROP, log_path: str = DEFAULT_LOG,
              db_path=None, include_disabled: bool = False,
-             multipart_keys=None, all_in_one: bool = False) -> str:
+             multipart_keys=None, all_in_one: bool = False,
+             link_mode: str = "attachments_only",
+             onedrive_root: str = DEFAULT_ONEDRIVE_ROOT) -> str:
     """Return the full .bas text. multipart_keys: dump-type keys whose feed sends
     SHA-stamped multipart parts (each part is enqueued; the app reassembles)."""
+    if link_mode not in LINK_MODES:
+        raise ValueError(f"invalid link_mode: {link_mode}")
     all_types = df.list_dump_types(db_path) if db_path else df.list_dump_types()
     types = list(all_types)
     if not include_disabled:
@@ -314,6 +325,8 @@ Private Const PYTHON_EXE As String = {_vqs(python_exe)}
 Private Const RUNNER     As String = {_vqs(runner)}
 Private Const DROP_FOLDER As String = {_vqs(drop_folder)}
 Private Const INTAKE_LOG  As String = {_vqs(log_path)}
+Private Const LINK_MODE   As String = {_vqs(link_mode)}
+Private Const ONEDRIVE_ROOT As String = {_vqs(onedrive_root)}
 
 {'Private WithEvents inboxItems As Outlook.Items' if all_in_one else ''}
 
@@ -332,6 +345,9 @@ Public Sub RouteMail(ByVal Item As Object)
     subjectText = LCase(mail.Subject & "")
     bodyText = LCase(mail.Body & "")
     attachNames = LCase(AttachmentNames(mail))
+    If LINK_MODE <> "attachments_only" Then
+        attachNames = attachNames & " " & LCase(CloudLinkText(mail.HTMLBody & ""))
+    End If
     anywhereText = senderEmail & " " & subjectText & " " & bodyText & " " & attachNames
 
     WriteIntakeLog "NEW | sender=" & senderEmail & " | subj=" & subjectText
@@ -378,36 +394,58 @@ Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, ByVal dumpKey As String)
     On Error GoTo EH
     Dim att As Outlook.Attachment, fpath As String, cmd As String, jobFile As String
     Dim entryId As String, entryKey As String, smtp As String, didOne As Boolean
-    Dim token As String, originalName As String
+    Dim token As String, originalName As String, links As Collection
+    Dim cloudUrl As Variant, linkIndex As Long
 
     EnsureFolder DROP_FOLDER
     entryId = mail.EntryID
     smtp = LCase(Trim(SenderSMTP(mail)))
 
     didOne = False
-    For Each att In mail.Attachments
-        ' Keep valid data files regardless of size; exclude signature images by
-        ' extension instead of dropping every attachment under 4 KB.
-        If IsDataAttachment(att) Then
-            token = UniqueToken(mail, att.Index)
-            originalName = SafeFileName(att.FileName)
-            fpath = DROP_FOLDER & "\\" & token & "_" & originalName
-            att.SaveAsFile fpath
-            entryKey = entryId & ":" & CStr(att.Index)
-            jobFile = WriteJobFile(token, fpath, originalName, mail.Subject & "", _
-                                   smtp, entryKey, dumpKey)
+    If LINK_MODE <> "links_only" Then
+        For Each att In mail.Attachments
+            ' Keep valid data files regardless of size; exclude signature images by
+            ' extension instead of dropping every attachment under 4 KB.
+            If IsDataAttachment(att) Then
+                token = UniqueToken(mail, att.Index)
+                originalName = SafeFileName(att.FileName)
+                fpath = DROP_FOLDER & "\\" & token & "_" & originalName
+                att.SaveAsFile fpath
+                entryKey = entryId & ":" & CStr(att.Index)
+                jobFile = WriteJobFile(token, fpath, originalName, "", _
+                                       mail.Subject & "", smtp, entryKey, dumpKey)
+                cmd = """" & PYTHON_EXE & """ """ & RUNNER & _
+                      """ --job-file """ & jobFile & """"
+                RunAndLog cmd, dumpKey, originalName
+                didOne = True
+            End If
+        Next
+    End If
+
+    ' In "either" mode a real attachment wins. This prevents an Outlook cloud
+    ' attachment from being queued twice as both a file and an HTML link.
+    If Not didOne And LINK_MODE <> "attachments_only" Then
+        Set links = ExtractOneDriveLinks(mail.HTMLBody & "")
+        linkIndex = 0
+        For Each cloudUrl In links
+            linkIndex = linkIndex + 1
+            token = UniqueToken(mail, 1000 + linkIndex)
+            originalName = CloudLinkName(CStr(cloudUrl))
+            entryKey = entryId & ":link:" & CStr(linkIndex)
+            jobFile = WriteJobFile(token, "", originalName, CStr(cloudUrl), _
+                                   mail.Subject & "", smtp, entryKey, dumpKey)
             cmd = """" & PYTHON_EXE & """ """ & RUNNER & _
                   """ --job-file """ & jobFile & """"
-            RunAndLog cmd, dumpKey, originalName
+            RunAndLog cmd, dumpKey, IIf(Len(originalName) > 0, originalName, "(OneDrive link)")
             didOne = True
-        End If
-    Next
+        Next
+    End If
 
-    ' No attachment (e.g. a body-only trigger): still enqueue a task with no file.
+    ' No attachment/link (e.g. a body-only trigger): still enqueue a task with no file.
     If Not didOne Then
         token = UniqueToken(mail, 0)
-        jobFile = WriteJobFile(token, "", "", mail.Subject & "", smtp, _
-                               entryId & ":0", dumpKey)
+        jobFile = WriteJobFile(token, "", "", "", mail.Subject & "", _
+                               smtp, entryId & ":0", dumpKey)
         cmd = """" & PYTHON_EXE & """ """ & RUNNER & _
               """ --job-file """ & jobFile & """"
         RunAndLog cmd, dumpKey, "(no attachment)"
@@ -487,13 +525,98 @@ Private Function IsDataAttachment(ByVal att As Outlook.Attachment) As Boolean
     If p = 0 Then Exit Function
     ext = Mid$(LCase(att.FileName), p)
     Select Case ext
-        Case ".csv", ".xlsx", ".xls", ".xlsb", ".txt", ".json", _
+        Case ".csv", ".xlsx", ".xlsm", ".xls", ".xlsb", ".txt", ".json", _
              ".zip", ".gz", ".pdf", ".tsv"
             IsDataAttachment = True
     End Select
     Exit Function
 EH:
     Debug.Print "IsDataAttachment error " & Err.Number & ": " & Err.Description
+End Function
+
+
+Private Function ExtractOneDriveLinks(ByVal html As String) As Collection
+    On Error GoTo EH
+    Dim result As New Collection, rx As Object, matches As Object, m As Object
+    Dim url As String
+    Set rx = CreateObject("VBScript.RegExp")
+    rx.Pattern = "href\\s*=\\s*[""'](https?://[^""']+)[""']"
+    rx.IgnoreCase = True
+    rx.Global = True
+    Set matches = rx.Execute(html)
+    For Each m In matches
+        url = HtmlDecode(CStr(m.SubMatches(0)))
+        If IsTrustedCloudLink(url) Then AddUniqueLink result, url
+    Next
+    Set ExtractOneDriveLinks = result
+    Exit Function
+EH:
+    WriteIntakeLog "ERR ExtractOneDriveLinks: " & Err.Number & " | " & Err.Description
+    Set ExtractOneDriveLinks = New Collection
+End Function
+
+
+Private Function HtmlDecode(ByVal value As String) As String
+    value = Replace(value, "&amp;", "&", 1, -1, vbTextCompare)
+    value = Replace(value, "&quot;", """", 1, -1, vbTextCompare)
+    value = Replace(value, "&#39;", "'", 1, -1, vbTextCompare)
+    HtmlDecode = value
+End Function
+
+
+Private Function UrlHost(ByVal value As String) As String
+    Dim p As Long, tail As String, stopAt As Long, ch As Variant, q As Long
+    p = InStr(1, value, "://", vbTextCompare)
+    If p = 0 Then Exit Function
+    tail = Mid$(value, p + 3)
+    stopAt = Len(tail) + 1
+    For Each ch In Array("/", "?", "#", ":")
+        q = InStr(1, tail, CStr(ch), vbBinaryCompare)
+        If q > 0 And q < stopAt Then stopAt = q
+    Next
+    UrlHost = LCase$(Left$(tail, stopAt - 1))
+End Function
+
+
+Private Function IsTrustedCloudLink(ByVal value As String) As Boolean
+    Dim host As String
+    host = UrlHost(value)
+    IsTrustedCloudLink = (host = "1drv.ms" Or host = "onedrive.live.com" Or _
+                          Right$(host, 15) = ".sharepoint.com")
+End Function
+
+
+Private Sub AddUniqueLink(ByVal links As Collection, ByVal value As String)
+    Dim existing As Variant
+    For Each existing In links
+        If StrComp(CStr(existing), value, vbTextCompare) = 0 Then Exit Sub
+    Next
+    links.Add value
+End Sub
+
+
+Private Function CloudLinkName(ByVal value As String) As String
+    Dim clean As String, p As Long
+    clean = value
+    p = InStr(clean, "?")
+    If p > 0 Then clean = Left$(clean, p - 1)
+    Do While Right$(clean, 1) = "/"
+        clean = Left$(clean, Len(clean) - 1)
+    Loop
+    p = InStrRev(clean, "/")
+    If p > 0 Then clean = Mid$(clean, p + 1)
+    clean = Replace(clean, "%20", " ", 1, -1, vbTextCompare)
+    CloudLinkName = SafeFileName(clean)
+End Function
+
+
+Private Function CloudLinkText(ByVal html As String) As String
+    Dim links As Collection, value As Variant, result As String
+    Set links = ExtractOneDriveLinks(html)
+    For Each value In links
+        result = result & " " & CloudLinkName(CStr(value)) & " " & CStr(value)
+    Next
+    CloudLinkText = result
 End Function
 
 
@@ -527,7 +650,8 @@ End Function
 
 
 Private Function WriteJobFile(ByVal token As String, ByVal filePath As String, _
-                              ByVal originalName As String, ByVal subject As String, _
+                              ByVal originalName As String, ByVal sourceUrl As String, _
+                              ByVal subject As String, _
                               ByVal sender As String, ByVal entryId As String, _
                               ByVal dumpKey As String) As String
     On Error GoTo EH
@@ -539,6 +663,8 @@ Private Function WriteJobFile(ByVal token As String, ByVal filePath As String, _
     payload = "{""enqueue"":true,""delete_after_read"":true," & _
               """file"":""" & JsonEscape(filePath) & """," & _
               """original_filename"":""" & JsonEscape(originalName) & """," & _
+              """source_url"":""" & JsonEscape(sourceUrl) & """," & _
+              """cloud_root"":""" & JsonEscape(ONEDRIVE_ROOT) & """," & _
               """subject"":""" & JsonEscape(subject) & """," & _
               """sender"":""" & JsonEscape(sender) & """," & _
               """entry_id"":""" & JsonEscape(entryId) & """," & _
