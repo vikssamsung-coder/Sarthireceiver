@@ -116,19 +116,27 @@ def _rules_to_vba(recognition_json: str) -> str:
     return " Or ".join(exprs)
 
 
-def _watcher_sub(key: str, name: str, match_expr: str, dump_type: str) -> str:
+def _watcher_sub(key: str, name: str, match_expr: str, dump_type: str,
+                 intake_mode: str) -> str:
     safe = "".join(ch for ch in key if ch.isalnum() or ch == "_") or "feed"
     return f'''
 ' ---- {name} ({key}) ----
 Private Function Watch_{safe}(ByVal mail As Outlook.MailItem, _
                          ByVal senderEmail As String, ByVal subjectText As String, _
                          ByVal bodyText As String, ByVal attachNames As String, _
-                         ByVal anywhereText As String) As Boolean
+                         ByVal cloudLinkNames As String) As Boolean
     On Error GoTo EH
+    If {_vqs(intake_mode)} = "links_only" Then
+        attachNames = cloudLinkNames
+    ElseIf {_vqs(intake_mode)} = "attachments_or_links" Then
+        attachNames = attachNames & " " & cloudLinkNames
+    End If
+    Dim anywhereText As String
+    anywhereText = senderEmail & " " & subjectText & " " & bodyText & " " & attachNames
     If Not ({match_expr}) Then Exit Function
     Watch_{safe} = True
     WriteIntakeLog "MATCH {key} | sender=" & senderEmail & " | subj=" & subjectText
-    EnqueueMail mail, {_vqs(dump_type)}
+    EnqueueMail mail, {_vqs(dump_type)}, {_vqs(intake_mode)}
     Exit Function
 EH:
     WriteIntakeLog "ERR Watch_{safe}: " & Err.Number & " | " & Err.Description
@@ -192,6 +200,8 @@ def validation_report(db_path=None) -> dict:
     rows, routable = [], []
     for t in types:
         key = t["key"]
+        valid_intake = (t.get("intake_mode") or "generator_default") in (
+            LINK_MODES | {"generator_default"})
         try:
             parsed = json.loads(t.get("recognition_json") or '{"groups":[]}')
             valid_json = isinstance(parsed, dict) and isinstance(parsed.get("groups", []), list)
@@ -205,7 +215,7 @@ def validation_report(db_path=None) -> dict:
 
         if not t.get("enabled"):
             state = "Disabled"
-        elif not valid_json:
+        elif not valid_json or not valid_intake:
             state = "Invalid configuration"
         elif has_rules and has_steps:
             state = "Active and routable"
@@ -244,6 +254,12 @@ def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
     routable_types = []
     for t in types:
         key = t["key"]
+        feed_mode = t.get("intake_mode") or "generator_default"
+        if feed_mode == "generator_default":
+            feed_mode = link_mode
+        if feed_mode not in LINK_MODES:
+            invalid_rules.append(f"{key} (invalid intake mode: {feed_mode})")
+            continue
 
         # Both PMD and direct dumps arrive via Outlook — PMD with prefilled/
         # standard details, direct with feed-specific keywords. Either way it's
@@ -273,11 +289,12 @@ def generate(python_exe: str = DEFAULT_PYTHON, runner: str = DEFAULT_RUNNER,
             # Do not generate a route that can only create failed queue jobs.
             continue
 
-        watchers.append(_watcher_sub(key, t.get("name") or key, expr, key))
+        watchers.append(_watcher_sub(
+            key, t.get("name") or key, expr, key, feed_mode))
         routable_types.append(t)
         safe = "".join(ch for ch in key if ch.isalnum() or ch == "_") or "feed"
-        calls.append(f"    If Watch_{safe}(mail, senderEmail, subjectText, "
-                     f"bodyText, attachNames, anywhereText) Then Exit Sub")
+        calls.append(f"    If Watch_{safe}(mail, senderEmail, subjectText, _\n"
+                     f"        bodyText, attachNames, cloudLinkNames) Then Exit Sub")
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     notes = []
@@ -340,15 +357,12 @@ Public Sub RouteMail(ByVal Item As Object)
     Dim mail As Outlook.MailItem: Set mail = Item
 
     Dim senderEmail As String, subjectText As String, bodyText As String
-    Dim attachNames As String, anywhereText As String
+    Dim attachNames As String, cloudLinkNames As String
     senderEmail = LCase(Trim(SenderSMTP(mail)))
     subjectText = LCase(mail.Subject & "")
     bodyText = LCase(mail.Body & "")
     attachNames = LCase(AttachmentNames(mail))
-    If LINK_MODE <> "attachments_only" Then
-        attachNames = attachNames & " " & LCase(CloudLinkText(mail.HTMLBody & ""))
-    End If
-    anywhereText = senderEmail & " " & subjectText & " " & bodyText & " " & attachNames
+    cloudLinkNames = LCase(CloudLinkText(mail.HTMLBody & ""))
 
     WriteIntakeLog "NEW | sender=" & senderEmail & " | subj=" & subjectText
 
@@ -390,7 +404,8 @@ End Sub
 '====================================================================
 '  CORE: save attachment(s) + enqueue a task in the app
 '====================================================================
-Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, ByVal dumpKey As String)
+Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, ByVal dumpKey As String, _
+                        ByVal intakeMode As String)
     On Error GoTo EH
     Dim att As Outlook.Attachment, fpath As String, cmd As String, jobFile As String
     Dim entryId As String, entryKey As String, smtp As String, didOne As Boolean
@@ -402,7 +417,7 @@ Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, ByVal dumpKey As String)
     smtp = LCase(Trim(SenderSMTP(mail)))
 
     didOne = False
-    If LINK_MODE <> "links_only" Then
+    If intakeMode <> "links_only" Then
         For Each att In mail.Attachments
             ' Keep valid data files regardless of size; exclude signature images by
             ' extension instead of dropping every attachment under 4 KB.
@@ -424,7 +439,7 @@ Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, ByVal dumpKey As String)
 
     ' In "either" mode a real attachment wins. This prevents an Outlook cloud
     ' attachment from being queued twice as both a file and an HTML link.
-    If Not didOne And LINK_MODE <> "attachments_only" Then
+    If Not didOne And intakeMode <> "attachments_only" Then
         Set links = ExtractOneDriveLinks(mail.HTMLBody & "")
         linkIndex = 0
         For Each cloudUrl In links

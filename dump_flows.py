@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS dump_types (
     max_files         INTEGER,
     source            TEXT NOT NULL DEFAULT 'local',
     origin            TEXT NOT NULL DEFAULT 'direct',
+    intake_mode       TEXT NOT NULL DEFAULT 'generator_default',
     recognition_json  TEXT NOT NULL DEFAULT '{"groups":[]}',
     updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -86,6 +87,7 @@ _MIGRATIONS = {
     "max_files": "ALTER TABLE dump_types ADD COLUMN max_files INTEGER",
     "source": "ALTER TABLE dump_types ADD COLUMN source TEXT DEFAULT 'local'",
     "origin": "ALTER TABLE dump_types ADD COLUMN origin TEXT DEFAULT 'direct'",
+    "intake_mode": "ALTER TABLE dump_types ADD COLUMN intake_mode TEXT DEFAULT 'generator_default'",
     "recognition_json": "ALTER TABLE dump_types ADD COLUMN recognition_json TEXT DEFAULT '{\"groups\":[]}'",
 }
 
@@ -326,7 +328,8 @@ def get_dump_type(key, db_path: Path = DEFAULT_DB):
 
 
 def upsert_dump_type(key, name, enabled=1, sort_order=100, save_folder=None,
-                     handler=None, max_files=None, origin=None, db_path: Path = DEFAULT_DB) -> None:
+                     handler=None, max_files=None, origin=None, intake_mode=None,
+                     db_path: Path = DEFAULT_DB) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     with _conn(db_path) as c:
         exists = c.execute("SELECT 1 FROM dump_types WHERE key=?", (key,)).fetchone()
@@ -334,15 +337,17 @@ def upsert_dump_type(key, name, enabled=1, sort_order=100, save_folder=None,
             c.execute(
                 "UPDATE dump_types SET name=?, enabled=?, sort_order=?, save_folder=?, "
                 "handler=COALESCE(?,handler), max_files=COALESCE(?,max_files), "
-                "origin=COALESCE(?,origin), updated_at=? WHERE key=?",
+                "origin=COALESCE(?,origin), intake_mode=COALESCE(?,intake_mode), "
+                "updated_at=? WHERE key=?",
                 (name, int(enabled), int(sort_order), save_folder or None,
-                 handler or None, max_files, origin, now, key))
+                 handler or None, max_files, origin, intake_mode, now, key))
         else:
             c.execute(
                 "INSERT INTO dump_types(key,name,enabled,sort_order,save_folder,handler,"
-                "max_files,origin,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "max_files,origin,intake_mode,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (key, name, int(enabled), int(sort_order), save_folder or None,
-                 handler or None, max_files, origin or "direct", now))
+                 handler or None, max_files, origin or "direct",
+                 intake_mode or "generator_default", now))
 
 
 def delete_dump_type(key, db_path: Path = DEFAULT_DB) -> None:

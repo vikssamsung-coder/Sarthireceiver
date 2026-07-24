@@ -23,8 +23,11 @@ class VbaGeneratorTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _feed(self, key, priority, conditions, with_steps=True):
-        df.upsert_dump_type(key, key, sort_order=priority, db_path=self.db)
+    def _feed(self, key, priority, conditions, with_steps=True,
+              intake_mode=None):
+        df.upsert_dump_type(
+            key, key, sort_order=priority, intake_mode=intake_mode,
+            db_path=self.db)
         df.set_recognition(key, [{"mode": "all", "conditions": conditions}],
                            db_path=self.db)
         if with_steps:
@@ -117,8 +120,41 @@ class VbaGeneratorTests(unittest.TestCase):
             ".sharepoint.com", "1drv.ms", root,
         ):
             self.assertIn(required, code)
-        self.assertIn('If Not didOne And LINK_MODE <> "attachments_only" Then', code)
+        self.assertIn('If Not didOne And intakeMode <> "attachments_only" Then', code)
         self.assertIn('Case ".csv", ".xlsx", ".xlsm"', code)
+
+    def test_dump_types_can_override_the_generator_file_source(self):
+        conditions = [
+            {"field": "subject", "op": "contains", "value": "feed"},
+        ]
+        self._feed("attached", 10, conditions,
+                   intake_mode="attachments_only")
+        self._feed("linked", 20, conditions,
+                   intake_mode="links_only")
+
+        code = vg.generate(
+            db_path=self.db, all_in_one=True,
+            link_mode="attachments_or_links",
+        )
+
+        self.assertIn(
+            'EnqueueMail mail, "attached", "attachments_only"', code)
+        self.assertIn(
+            'EnqueueMail mail, "linked", "links_only"', code)
+        self.assertIn(
+            'If "links_only" = "links_only" Then', code)
+        self.assertIn(
+            'Private Sub EnqueueMail(ByVal mail As Outlook.MailItem, '
+            'ByVal dumpKey As String, _', code)
+
+    def test_dump_type_intake_mode_is_persisted(self):
+        self._feed("linked", 10, [
+            {"field": "subject", "op": "contains", "value": "linked"},
+        ], intake_mode="links_only")
+
+        row = df.get_dump_type("linked", self.db)
+
+        self.assertEqual(row["intake_mode"], "links_only")
 
     def test_synced_sharepoint_link_resolves_without_graph(self):
         root = self.root / "OneDrive - Bonanza Group"

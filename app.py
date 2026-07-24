@@ -343,6 +343,25 @@ elif ss.screen == "Configure":
         format_func=lambda x: "Plan My Day — fixed format, matched by label"
         if x == "pmd" else "Direct email — other system, matched by an identifier you set")
 
+    intake_options = {
+        "Use VBA generator default": "generator_default",
+        "Email attachments only": "attachments_only",
+        "Attachments, or OneDrive/SharePoint link": "attachments_or_links",
+        "OneDrive/SharePoint links only": "links_only",
+    }
+    intake_cur = (t.get("intake_mode") if not is_new else "generator_default")
+    intake_labels = list(intake_options)
+    intake_values = list(intake_options.values())
+    if intake_cur not in intake_values:
+        intake_cur = "generator_default"
+    intake_label = st.selectbox(
+        "Incoming file source",
+        intake_labels,
+        index=intake_values.index(intake_cur),
+        help="Choose this per dump type. The generator default is used only when "
+             "this dump type does not need its own setting.")
+    intake_mode_in = intake_options[intake_label]
+
     if is_new:
         if st.button("Create dump type", type="primary"):
             k = key_in.strip().lower().replace(" ", "_")
@@ -353,6 +372,7 @@ elif ss.screen == "Configure":
             else:
                 df.upsert_dump_type(k, name_in.strip() or k, int(enabled_in), int(order_in),
                                     save_folder=folder_in.strip() or None, origin=origin_in,
+                                    intake_mode=intake_mode_in,
                                     db_path=DB_PATH)
                 goto("Configure", sel=k); st.rerun()
         st.stop()
@@ -361,7 +381,8 @@ elif ss.screen == "Configure":
     hb1, hb2 = st.columns([1, 4])
     if hb1.button("Save details", type="primary"):
         df.upsert_dump_type(key, name_in.strip() or key, int(enabled_in), int(order_in),
-                            save_folder=folder_in.strip() or None, origin=origin_in, db_path=DB_PATH)
+                            save_folder=folder_in.strip() or None, origin=origin_in,
+                            intake_mode=intake_mode_in, db_path=DB_PATH)
         st.success("Saved.")
     if hb2.button("Delete this dump type"):
         df.delete_dump_type(key, DB_PATH); goto("Dump types"); st.rerun()
