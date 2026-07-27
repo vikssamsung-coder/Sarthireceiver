@@ -26,6 +26,35 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
   written back after each run).
 - **Neon catalog** — sync the shared `dump_types` list; flags active types with
   no steps yet.
+- **Client Intelligence** — runs the separately checked-out
+  `Sarthi_Evaluator` through a controlled local worker. It can build
+  `Sarthi_New_Client_360.xlsx`, validate/test/run the evaluator, show job
+  history and logs, cancel a running job, and expose completed workbooks.
+
+## Client Intelligence setup
+
+Keep `Sarthireceiver` and `Sarthi_Evaluator` in separate folders. In the
+Receiver sidebar, open **Client Intelligence** and configure:
+
+```text
+Evaluator folder : C:\Users\Vikrant.Dale\Downloads\Sarthi\Sarthi_Evaluator
+Leads CSV         : D:\Sarthi\Leads\Leads.csv
+Client 360 file   : D:\New call evalution\Transaction and profile\Sarthi_New_Client_360.xlsx
+Output folder     : D:\New call evalution\quality report\Output\Facts
+```
+
+Set database credentials as Windows environment variables. In particular,
+`SARTHI_DB_PASSWORD` must be set because a background job cannot answer an
+interactive password prompt. Set `OPENAI_API_KEY` for evaluator modes that use
+AI. Neither secret is stored by Receiver.
+
+The integration launches only these approved operations:
+
+```text
+BUILD_360 · VALIDATE · TEST · FULL · TRANSACTION_ONLY
+```
+
+It never accepts arbitrary scripts or command-line text from the browser.
 
 ## Files
 

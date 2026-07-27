@@ -26,6 +26,7 @@ import service_manager
 import intake_queue as iq
 import intake_worker
 import vba_generator
+import app_client_intelligence
 
 DB_PATH = df.DEFAULT_DB          # one path, defined once, in dump_flows
 
@@ -178,7 +179,8 @@ def recognition_builder(key):
 with st.sidebar:
     st.markdown("### ◈ Dump Processor")
     st.caption("Sarthi · receiver")
-    NAV = ["Overview", "Dump types", "Intake queue", "VBA generator", "MIS reports", "Run history", "MIS history",
+    NAV = ["Overview", "Dump types", "Intake queue", "VBA generator", "Client Intelligence",
+           "MIS reports", "Run history", "MIS history",
            "Neon catalog", "Services", "Settings"]
     # Configure screens are sub-screens — keep the nav on their parent while editing
     _PARENT = {"Configure": "Dump types", "Configure MIS": "MIS reports"}
@@ -622,6 +624,12 @@ elif ss.screen == "Configure MIS":
 
 elif ss.screen == "MIS history":
     app_mis.screen_mis_history(DB_PATH)
+
+# ===========================================================================
+# CLIENT INTELLIGENCE
+# ===========================================================================
+elif ss.screen == "Client Intelligence":
+    app_client_intelligence.screen(DB_PATH)
 
 # ===========================================================================
 # RUN HISTORY
