@@ -1,5 +1,7 @@
 # Sarthi Dump Processor
 
+> **Project source of truth:** See [Complete Project Specification](docs/PROJECT_SPECIFICATION.md) for the full architecture, feature register, Client Intelligence data contracts, transaction taxonomy, AI optimization, security model, operations, testing, current status, known gaps, and roadmap.
+
 Rebuilt to the approved design. One app to manage how the receiver handles every
 dump: the Neon catalog of what can be sent, and — per type — how it's recognized,
 where it's saved, and the sequence of code that runs. Your `email_processor.py`
