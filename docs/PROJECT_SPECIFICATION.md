@@ -2,11 +2,13 @@
 
 > **Status:** Living source of truth  
 > **Repository:** `vikssamsung-coder/Sarthireceiver`  
-> **Companion engine:** `vikssamsung-coder/Sarthi_Evaluator`  
+> **Processing engine:** Integrated in `Sarthireceiver/client_intelligence_pipeline`  
 > **Last consolidated:** 27 July 2026  
 > **Owner:** Bigul / Sarthi  
 >
 > Update this document whenever a feature, data contract, taxonomy rule, path, dependency, security control, or operating procedure changes.
+>
+> **31 July 2026 architecture update:** The Receiver no longer launches a separately checked-out Sarthi Evaluator for this workflow. The Customer Final Evaluation pipeline is bundled in this repository and uses fixed production paths. `Leads.csv` remains at `D:\\Sarthi\\Leads\\Leads.csv` and is read in place.
 
 ---
 
@@ -103,7 +105,7 @@ flowchart TD
     A["Outlook / User / Schedule"] --> B["Sarthi Receiver"]
     B --> C["SQLite queues and history"]
     B --> D["Approved local worker"]
-    D --> E["Sarthi Evaluator"]
+    D --> E["Integrated Customer Evaluation pipeline"]
     E --> F["Leads CSV + SQL"]
     E --> G["Call evaluation summaries"]
     E --> H["Client 360 workbook"]
@@ -137,7 +139,8 @@ The Streamlit page launches a detached worker. The worker constructs a command o
 | `app_client_intelligence.py` | Client Intelligence UI |
 | `client_intelligence_jobs.py` | SQLite job registry |
 | `client_intelligence_worker.py` | Detached evaluator process worker |
-| `evaluator_adapter.py` | Approved modes, capabilities, commands, expected outputs |
+| `customer_evaluation_adapter.py` | Fixed paths, approved modes, capabilities, commands, expected outputs |
+| `client_intelligence_pipeline/` | Client 360 and Common Call Master processing |
 
 ---
 
