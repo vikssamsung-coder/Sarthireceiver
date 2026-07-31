@@ -28,39 +28,42 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
   written back after each run).
 - **Neon catalog** — sync the shared `dump_types` list; flags active types with
   no steps yet.
-- **Client Intelligence** — runs the separately checked-out
-  `Sarthi_Evaluator` through a controlled local worker. It can build
-  `Sarthi_New_Client_360.xlsx`, validate/test/run the evaluator, show job
-  history and logs, cancel a running job, and expose completed workbooks.
+- **Client Intelligence** — the integrated Customer Final Evaluation workspace. It refreshes Client 360, ingests evaluated-call files, creates stable call IDs, deduplicates and versions calls, builds the client-wise timeline, and generates the operational workbook.
 
-## Client Intelligence setup
+## Client I## Client Intelligence setup
 
-Keep `Sarthireceiver` and `Sarthi_Evaluator` in separate folders. In the
-Receiver sidebar, open **Client Intelligence** and configure:
+The Receiver contains the pipeline; a separate `Sarthi_Evaluator` checkout is
+not required for this section.
 
-```text
-Evaluator folder : C:\Users\Vikrant.Dale\Downloads\Sarthi\Sarthi_Evaluator
-Leads CSV         : D:\Sarthi\Leads\Leads.csv
-Client 360 file   : D:\New call evalution\Transaction and profile\Sarthi_New_Client_360.xlsx
-Output folder     : D:\New call evalution\quality report\Output\Facts
-```
-
-Set database credentials as Windows environment variables. In particular,
-`SARTHI_DB_PASSWORD` must be set because a background job cannot answer an
-interactive password prompt. Set `OPENAI_API_KEY` for evaluator modes that use
-AI. Neither secret is stored by Receiver.
-
-The integration launches only these approved operations:
+Fixed locations:
 
 ```text
-BUILD_360 · VALIDATE · TEST · FULL · TRANSACTION_ONLY
+Working folder : D:\Customer Final Evaluation
+Leads CSV      : D:\Sarthi\Leads\Leads.csv
+Call inputs    : D:\Customer Final Evaluation\01_Input\Call_Analysis
+Client 360     : D:\Customer Final Evaluation\01_Input\Client_360
+Current output : D:\Customer Final Evaluation\04_Output\Current
 ```
 
-It never accepts arbitrary scripts or command-line text from the browser.
+`Leads.csv` remains at its existing location and is read directly. Do not copy
+it into the Customer Final Evaluation folder.
 
-## Files
+Available operations are allow-listed:
 
-| file | what it is |
+```text
+SETUP · BUILD_360 · PROCESS_CALLS · FULL
+```
+
+Set `SARTHI_DB_PASSWORD` as a Windows environment variable before running
+`BUILD_360` or `FULL`. Call-file processing does not require the MySQL
+password. Place evaluated `.xlsx`, `.xlsm`, or `.csv` files in
+`01_Input\Call_Analysis`, then run **Process evaluated call files**.
+
+The generated workbook is:
+
+`D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
+
+ file | what it is |
 |---|---|
 | `app.py` | the Streamlit app and navigation. |
 | `app_client_intelligence.py` | Integrated Client Intelligence screen. |
