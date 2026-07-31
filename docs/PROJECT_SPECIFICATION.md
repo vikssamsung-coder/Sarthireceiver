@@ -8,7 +8,7 @@
 >
 > Update this document whenever a feature, data contract, taxonomy rule, path, dependency, security control, or operating procedure changes.
 >
-> **31 July 2026 architecture update:** The Receiver no longer launches a separately checked-out Sarthi Evaluator for this workflow. The Customer Final Evaluation pipeline is bundled in this repository and uses fixed production paths. `Leads.csv` remains at `D:\\Sarthi\\Leads\\Leads.csv` and is read in place.
+> **31 July 2026 architecture update:** The Receiver now contains the complete Phase 1 and Phase 2 Customer Final Evaluation pipeline. It uses fixed production paths, reads `Leads.csv` in place from `D:\\Sarthi\\Leads\\Leads.csv`, interprets each new/changed call once, and maintains permanent ledgers plus a unified Action Worklist.
 
 ---
 
@@ -75,8 +75,10 @@ The bundled `client_intelligence_pipeline` owns:
 - deterministic call IDs, hashes, deduplication, and corrected-call versioning
 - client-wise chronological call timeline
 - SQLite control state and immutable processing logs
-- schema-ready Interest, Requirement, and Issue ledgers
-- the unified Action Worklist and Excel operational output
+- structured OpenAI extraction for each new or changed call, with exact duplicates skipped
+- permanent Interest, Requirement, and Issue ledgers
+- deterministic matching, status control, ownership, SLA, history, closure, and reopening
+- the unified Action Worklist for all three source types and Excel operational output
 
 The Streamlit screen and worker may launch only `SETUP`, `BUILD_360`,
 `PROCESS_CALLS`, and `FULL`. Arbitrary script paths or command text are not
@@ -221,7 +223,6 @@ The Settings screen can download current source from GitHub. It must preserve:
 - local SQLite database
 - secrets
 - local configuration
-- evaluator checkout
 - user data and outputs
 
 A restart is required after updating source.
@@ -232,45 +233,30 @@ A restart is required after updating source.
 
 The sidebar includes **Client Intelligence**.
 
-### 7.1 Configuration
+### 7.1 Fixed production locations
 
-The page stores local settings for:
-
-| Setting | Typical value |
+| Purpose | Fixed location |
 |---|---|
-| Evaluator folder | `C:\Users\Vikrant.Dale\Downloads\Sarthi\Sarthi_Evaluator` |
-| Leads CSV | `D:\Sarthi\Leads\Leads.csv` |
-| Client 360 workbook | `D:\New call evalution\Transaction and profile\Sarthi_New_Client_360.xlsx` |
-| Output folder | `D:\New call evalution\quality report\Output\Facts` |
+| Working root | `D:\\Customer Final Evaluation` |
+| Leads CSV | `D:\\Sarthi\\Leads\\Leads.csv` |
+| Evaluated calls | `D:\\Customer Final Evaluation\\01_Input\\Call_Analysis` |
+| Client 360 | `D:\\Customer Final Evaluation\\01_Input\\Client_360` |
+| Current output | `D:\\Customer Final Evaluation\\04_Output\\Current` |
 
-Settings are saved beside the Receiver database in `client_intelligence_settings.json`.
+Only the Client 360 date window and maximum AI calls per run are user settings. The source paths cannot be changed from the browser.
 
 ### 7.2 Approved operations
 
-Only these modes may be launched:
+| Internal mode | Purpose |
+|---|---|
+| `setup` | Create the fixed folder tree and taxonomy |
+| `build_360` | Refresh Client 360 from MySQL and the fixed Leads CSV |
+| `process_calls` | Ingest, deduplicate, version, interpret, reconcile, and generate outputs |
+| `full` | Refresh Client 360 and then process calls |
 
-| Internal mode | Screen label | Purpose |
-|---|---|---|
-| `build_360` | Build New Client 360 | Extract the current 360° profile workbook |
-| `validate` | Validate Intelligence | Validate inputs without chargeable AI processing |
-| `test` | Test Intelligence | Process a user-selected small limit |
-| `full` | Run Full Intelligence | Process all eligible new/changed records |
-| `transaction_only` | Transaction Taxonomy Only | Rebuild deterministic transaction flags without AI |
+### 7.3 Capability and cost controls
 
-The browser must never accept arbitrary Python code, arbitrary commands, or free-form command-line options.
-
-### 7.3 Capability detection
-
-The adapter checks for:
-
-- evaluator directory
-- `sarthi_new_clients_360_extract.py`
-- `run_optimized_pipeline.py`
-- `run_complete_pipeline.py`
-- `10_build_transaction_taxonomy.py`
-- `11_enrich_master_transaction_flags.py`
-
-The UI must show Ready/Missing and Optimized/Legacy status.
+The UI reports pipeline, Leads CSV, Client 360, call-file, database-password, and OpenAI-key readiness. `OPENAI_API_KEY` enables structured extraction; without it, ingestion remains safe and intelligence stays pending. `SARTHI_AI_MODEL` may override the default model. The maximum new/changed calls per run is configurable; exact duplicates never consume AI.
 
 ### 7.4 Job lifecycle
 
@@ -747,8 +733,8 @@ Receiver currently requires packages including:
 - psutil
 - psycopg
 - pywin32 on Windows
-
-Evaluator dependencies are installed from its own `requirements.txt`.
+- openai
+- pydantic
 
 ### 14.4 Update procedure
 
@@ -867,113 +853,61 @@ The optimization target is one initial AI call per eligible call summary and zer
 
 ## 17. Current implementation status
 
-### Implemented in Receiver
+### Phase 1 — implemented and regression-tested
 
-- Client Intelligence navigation and page
-- saved local path settings
-- extractor/optimized/legacy capability detection
-- five approved operations
-- SQLite job registry
-- detached worker
-- logs
-- cancellation
-- run history
-- expected-output downloads
-- legacy fallback
-- environment-based secret checks
-- README setup guidance
+- fixed folder initialization under `D:\\Customer Final Evaluation`
+- fixed Leads CSV read-in-place
+- Sarthi Client 360 refresh
+- common call standardization
+- stable call IDs and full-row/content hashes
+- exact duplicate skip
+- corrected-call versioning
+- collision review
+- client matching and unmatched routing
+- client-wise chronological timeline
+- SQLite persistence and processing audit
+- current and archived Excel workbooks
 
-### Implemented in published Evaluator
+### Phase 2 — implemented and regression-tested
 
-- legacy 01–07 fact processors
-- complete legacy orchestrator
-- New Client 360 extractor
-- stable output naming
-- TPP removal
-- environment-based SQL password
-- evaluator README and requirements
+- one schema-valid structured extraction per new or changed call
+- permanent Interest, Requirement, and Issue ledgers
+- deterministic client/category/product/description reconciliation
+- immutable ledger history
+- one unified Action Worklist covering interests, requirements, and issues
+- default ownership, priority, SLA date, overdue state, and escalation
+- issue repeat count and reopening
+- resolution pending confirmation
+- final closure only after client confirmation or system validation
+- AI extraction audit with model, prompt version, input hash, status, and error
+- run-level AI limit and ingestion-only operation when no key is available
 
-### Critical dependency to confirm
+### Current workbook
 
-At the last verified Receiver integration, the published Evaluator `main` did not contain `run_optimized_pipeline.py` and related optimized scripts. Receiver therefore used `run_complete_pipeline.py` as a visible fallback.
+`Sarthi_Client_Intelligence_Current.xlsx` contains Management Summary, Action Worklist, Client Call Timeline, Common Call Master, Processing Log, all three ledgers, Ledger History, Closed Actions, Client 360, duplicate/unmatched/error reviews, Taxonomy Master, AI Extraction Audit, and Call Versions Audit.
 
-Before claiming production optimization, confirm that Evaluator `main` contains:
+## 18. Recommended next phases
 
-- `08_build_unified_call_intelligence.py`
-- `09_expand_unified_facts.py`
-- `10_build_transaction_taxonomy.py`
-- `11_enrich_master_transaction_flags.py`
-- `run_optimized_pipeline.py`
-- `prompts/07_unified_call_intelligence_prompt.md`
+### Phase 3 — transaction validation and Client 360 enrichment
 
-Receiver will automatically prefer the optimized orchestrator once these files exist in the local evaluator checkout.
+- validate issue resolution from funds, orders, login, segment, and subscription data
+- populate transaction context in every action
+- enrich Client 360 with active interest, open requirement, open issue, overdue action, priority, and next-action fields
+- add configurable transaction taxonomy rules and versions
 
----
+### Phase 4 — operational action updates
 
-## 18. Known gaps and recommended roadmap
+- controlled team updates for assignment, attempts, action taken, outcome, and evidence
+- immutable Action History
+- role-based access and initiating-user audit
+- team-wise worklist exports and dashboards
 
-### Priority 0 — correctness
+### Phase 5 — management analytics
 
-- Publish and validate optimized evaluator scripts on Evaluator `main`.
-- Confirm `--transaction-only` is supported by the optimized orchestrator.
-- Confirm output folder arguments are honored consistently.
-- Lock and version all workbook column contracts.
-- Add schema-validation errors that name missing/renamed source columns.
-- Ensure `Action_Fact.xlsx` is produced by the optimized flow or clearly mark it as a separate action stage.
-
-### Priority 1 — operational completeness
-
-- Add a single **Run Complete Client Intelligence** operation:
-  - optionally update evaluator
-  - build 360
-  - validate
-  - process new/changed calls
-  - apply taxonomy
-  - rebuild facts/master/actions
-  - verify outputs
-- Add stage-level progress rather than raw logs only.
-- Show new AI calls, cache hits, token/cost estimate, flags, clients, and duration.
-- Add safe retry and resume controls.
-- Add output freshness timestamps and row counts.
-- Block parallel Full jobs unless explicitly safe.
-- Detect locked Excel files before launching.
-
-### Priority 2 — governance
-
-- Add authenticated users and roles.
-- Record initiating user.
-- Add configurable folder allow-list.
-- Add code/prompt/rule version to each job.
-- Add data-retention rules for logs and outputs.
-- Add taxonomy administration with version history.
-- Add action-team mapping administration.
-- Add alerting for failed scheduled jobs.
-
-### Priority 3 — cloud/hybrid control
-
-If a cloud-hosted interface is introduced:
-
-- use a secure cloud job queue
-- keep actual local file/SQL execution on the office worker
-- use outbound polling from the local agent
-- never expose local drives directly
-- authenticate and authorize every job
-- sign job payloads
-- restrict job types and parameters
-- upload only permitted summaries/outputs
-
-### Priority 4 — analytics
-
-- trend client risk and satisfaction over time
-- compare conversational and behavioural signals
-- measure action completion and effectiveness
-- measure issue recurrence
-- track activation, retention, and revenue movement after actions
-- segment thresholds by client value/activity profile
-- build team workload and SLA dashboards
-- build taxonomy precision/false-positive review workflow
-
----
+- issue recurrence and SLA trends
+- interest conversion and requirement fulfilment
+- action effectiveness against activation, trading, retention, and revenue
+- taxonomy review and false-positive workflow
 
 ## 19. Feature-control checklist
 
