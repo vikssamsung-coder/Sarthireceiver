@@ -50,6 +50,7 @@ def capabilities() -> dict[str, object]:
         "extractor_ready": (code / "sarthi_new_clients_360_extract.py").is_file(),
         "leads_ready": FIXED_LEADS_FILE.is_file(),
         "db_password_ready": bool(os.getenv("SARTHI_DB_PASSWORD")),
+        "openai_ready": bool(os.getenv("OPENAI_API_KEY")),
         "folders_ready": all(p[key].is_dir() for key in ("calls", "client360", "state", "current")),
         "client360_file": _latest(p["client360"], ("*.xlsx", "*.csv")),
         "call_file_count": sum(1 for pattern in ("*.xlsx", "*.xlsm", "*.csv")
@@ -94,6 +95,10 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
     python_exe = config.get("python_exe") or sys.executable
     setup = [python_exe, "-u", str(pipeline), "--root", str(FIXED_ROOT), "--init"]
     process = [python_exe, "-u", str(pipeline), "--root", str(FIXED_ROOT)]
+    if config.get("skip_ai"):
+        process.append("--skip-ai")
+    elif config.get("max_ai_calls"):
+        process += ["--max-ai-calls", str(max(1, int(config["max_ai_calls"])))]
     if mode == "setup":
         commands = [setup]
     elif mode == "build_360":
@@ -112,4 +117,3 @@ def output_files() -> list[Path]:
         p["client360"] / "Sarthi_New_Client_360.xlsx",
     ]
     return [path for path in candidates if path.is_file()]
-
