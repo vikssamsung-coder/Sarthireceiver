@@ -21,7 +21,7 @@ def _settings_path(db_path) -> Path:
 
 
 def _load_settings(db_path) -> dict:
-    data = {"window": "calendar", "days": 60}
+    data = {"window": "calendar", "days": 60, "max_ai_calls": 100}
     try:
         data.update(json.loads(_settings_path(db_path).read_text(encoding="utf-8")))
     except Exception:
@@ -80,15 +80,21 @@ def screen(db_path) -> None:
     )
     st.caption("Leads.csv stays in its existing location and is read directly; it is not copied.")
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Pipeline", "Ready" if caps["pipeline_ready"] else "Missing")
     c2.metric("Leads.csv", "Ready" if caps["leads_ready"] else "Missing")
     c3.metric("Call files", int(caps["call_file_count"]))
     c4.metric("Client 360", "Ready" if caps["client360_file"] else "Not built")
+    c5.metric("AI extraction", "Ready" if caps["openai_ready"] else "Ingest only")
     if not caps["db_password_ready"]:
         st.warning(
             "Set the Windows environment variable SARTHI_DB_PASSWORD before running "
             "a Client 360 refresh. Call-file processing does not require it."
+        )
+    if not caps["openai_ready"]:
+        st.info(
+            "OPENAI_API_KEY is not set. Calls will still be ingested, deduplicated and "
+            "versioned, but new intelligence will remain pending until the key is available."
         )
 
     st.subheader("Run")
@@ -97,6 +103,14 @@ def screen(db_path) -> None:
     selected = st.selectbox("Operation", labels)
     mode = by_label[selected]
     config = {"python_exe": sys.executable}
+    if mode in {"process_calls", "full"}:
+        config["max_ai_calls"] = st.number_input(
+            "Maximum new or changed calls to interpret in this run",
+            min_value=1, max_value=5000, value=int(saved.get("max_ai_calls", 100)), step=25,
+            help="Exact duplicate calls never use AI and do not count toward this limit.",
+        )
+        if mode == "process_calls":
+            _save_settings(db_path, {**saved, "max_ai_calls": int(config["max_ai_calls"])})
     if mode in {"build_360", "full"}:
         default_window = saved.get("window", "calendar")
         window = st.radio(
@@ -109,7 +123,10 @@ def screen(db_path) -> None:
                 "Rolling days", min_value=1, max_value=730,
                 value=int(saved.get("days", 60)),
             )
-        _save_settings(db_path, {"window": window, "days": int(config.get("days", 60))})
+        _save_settings(db_path, {
+            "window": window, "days": int(config.get("days", 60)),
+            "max_ai_calls": int(config.get("max_ai_calls", saved.get("max_ai_calls", 100))),
+        })
 
     history = jobs.list_jobs(db_path, 100)
     active = [row for row in history if row["status"] in {
@@ -163,4 +180,3 @@ def screen(db_path) -> None:
         selected_id = st.selectbox("View job log", [row["id"] for row in with_logs])
         row = next(item for item in with_logs if item["id"] == selected_id)
         st.code(_tail(row["log_path"]) or "(empty log)")
-
