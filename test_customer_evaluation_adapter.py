@@ -11,11 +11,15 @@ def main() -> None:
          patch.dict(adapter.os.environ, {"SARTHI_DB_PASSWORD": "test"}):
         setup, _ = adapter.build_commands("setup", {"python_exe": "python"})
         process, _ = adapter.build_commands("process_calls", {"python_exe": "python"})
+        limited, _ = adapter.build_commands(
+            "process_calls", {"python_exe": "python", "max_ai_calls": 125}
+        )
         full, _ = adapter.build_commands(
             "full", {"python_exe": "python", "window": "rolling", "days": 45}
         )
     assert len(setup) == 1
     assert len(process) == 2
+    assert "--max-ai-calls" in limited[-1] and "125" in limited[-1]
     assert len(full) == 3
     flat = [item for command in full for item in command]
     assert str(adapter.FIXED_ROOT) in flat
@@ -32,4 +36,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
