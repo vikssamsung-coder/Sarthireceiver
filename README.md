@@ -63,6 +63,10 @@ The generated workbook is:
 
 `D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
 
+Phase 2 interprets each new or changed call once and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates never use AI. Set `OPENAI_API_KEY` for structured extraction; without it, calls are still safely ingested and remain pending. The default model can be overridden with `SARTHI_AI_MODEL`, and the screen limits the maximum calls interpreted per run.
+
+Issue closure is controlled: an internal resolution claim becomes `Resolved Pending Confirmation`; final closure requires client confirmation or system/transaction validation.
+
 ## Files
 
 | file | what it is |
