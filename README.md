@@ -30,7 +30,7 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
   no steps yet.
 - **Client Intelligence** — the integrated Customer Final Evaluation workspace. It refreshes Client 360, ingests evaluated-call files, creates stable call IDs, deduplicates and versions calls, builds the client-wise timeline, and generates the operational workbook.
 
-## Client I## Client Intelligence setup
+## Client Intelligence setup
 
 The Receiver contains the pipeline; a separate `Sarthi_Evaluator` checkout is
 not required for this section.
@@ -63,7 +63,9 @@ The generated workbook is:
 
 `D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
 
- file | what it is |
+## Files
+
+| file | what it is |
 |---|---|
 | `app.py` | the Streamlit app and navigation. |
 | `app_client_intelligence.py` | Integrated Client Intelligence screen. |
