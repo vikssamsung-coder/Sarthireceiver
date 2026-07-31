@@ -62,7 +62,10 @@ It never accepts arbitrary scripts or command-line text from the browser.
 
 | file | what it is |
 |---|---|
-| `app.py` | the Streamlit app (the four screens). |
+| `app.py` | the Streamlit app and navigation. |
+| `app_client_intelligence.py` | Integrated Client Intelligence screen. |
+| `customer_evaluation_adapter.py` | Fixed-path, allow-listed command adapter. |
+| `client_intelligence_pipeline/` | Client 360 and common-call processing engine. |
 | `dump_flows.py` | registry: recognition + `resolve`, steps, folders, confirmations, catalog. |
 | `extract.py` | auto-detects zip/csv/xlsx: unzips or places the dump into the folder. |
 | `neon_sync.py` | reads the Neon URL from `secrets.toml` and syncs the catalog. |
