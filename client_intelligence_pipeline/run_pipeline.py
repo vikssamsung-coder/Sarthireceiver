@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bigul Sarthi Client Intelligence — Phase 1 ingestion and control pipeline."""
+"""Bigul Sarthi Client Intelligence ingestion, extraction, and ledger pipeline."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
+
+from phase2_intelligence import Phase2Counts, ensure_schema, refresh_action_controls, run_phase2
 
 
 DEFAULT_ROOT = Path(r"D:\Customer Final Evaluation")
@@ -317,6 +319,7 @@ def connect_db(path: Path) -> sqlite3.Connection:
         );
         """
     )
+    ensure_schema(con)
     return con
 
 
@@ -565,9 +568,57 @@ def load_taxonomy(paths: dict[str, Path]) -> pd.DataFrame:
     return pd.read_excel(path, dtype=str) if path.exists() else pd.DataFrame(TAXONOMY, columns=["Primary Category", "Subcategory", "Default Owner"])
 
 
+def ledger_frame(con: sqlite3.Connection, table: str, rename: dict[str, str], columns: list[str]) -> pd.DataFrame:
+    frame = query_frame(con, f"SELECT * FROM {table}")
+    if frame.empty:
+        return empty_frame(columns)
+    frame = frame.rename(columns=rename)
+    return frame[[column for column in columns if column in frame.columns]]
+
+
+def action_frame(con: sqlite3.Connection) -> tuple[pd.DataFrame, pd.DataFrame]:
+    frame = query_frame(con, "SELECT * FROM action_register")
+    if frame.empty:
+        return empty_frame(ACTION_COLUMNS), empty_frame(ACTION_COLUMNS)
+    rename = {
+        "action_id": "Action ID", "client_code": "Client Code", "lead_number": "Lead Number",
+        "client_name": "Client Name", "source_type": "Source Type",
+        "source_record_id": "Source Record ID", "source_call_id": "Source Call ID",
+        "identified_date": "Identified Date", "latest_mention_date": "Latest Mention Date",
+        "category": "Category", "subcategory": "Subcategory", "product_platform": "Product/Platform",
+        "item_summary": "Item Summary", "client_statement": "Client Statement",
+        "transaction_context": "Transaction Context", "current_status": "Current Status",
+        "action_disposition": "Action Disposition", "priority": "Priority",
+        "recommended_action": "Recommended Action", "assigned_team": "Assigned Team",
+        "assigned_employee": "Assigned Employee", "due_date": "Due Date",
+        "next_follow_up_date": "Next Follow-up Date", "attempts": "Attempts",
+        "previous_action": "Previous Action", "latest_action_taken": "Latest Action Taken",
+        "success_measure": "Success Measure", "outcome": "Outcome",
+        "closure_evidence": "Closure Evidence", "closed_date": "Closed Date",
+        "repeat_count": "Repeat Count", "escalation_level": "Escalation Level",
+        "latest_call_summary": "Latest Call Summary",
+    }
+    frame = frame.rename(columns=rename)
+    today = pd.Timestamp.now().normalize()
+    opened = pd.to_datetime(frame["Identified Date"], errors="coerce")
+    due = pd.to_datetime(frame["Due Date"], errors="coerce")
+    frame["Days Open"] = (today - opened.dt.normalize()).dt.days.clip(lower=0)
+    frame["SLA Status"] = "Within SLA"
+    active = frame["Closed Date"].fillna("").astype(str).str.strip().eq("")
+    frame.loc[active & due.notna() & due.lt(today), "SLA Status"] = "Overdue"
+    frame.loc[~active, "SLA Status"] = "Closed"
+    frame["_priority_rank"] = frame["Priority"].map({"Critical": 1, "High": 2, "Medium": 3, "Low": 4}).fillna(9)
+    frame["_due_sort"] = due
+    frame = frame.sort_values(["_priority_rank", "_due_sort", "Latest Mention Date"], na_position="last")
+    output = frame[[column for column in ACTION_COLUMNS if column in frame.columns]].copy()
+    closed = output[output["Closed Date"].fillna("").astype(str).str.strip().ne("")].copy()
+    active_output = output[output["Closed Date"].fillna("").astype(str).str.strip().eq("")].copy()
+    return active_output, closed
+
+
 def write_workbook(
     paths: dict[str, Path], con: sqlite3.Connection, client360: pd.DataFrame,
-    client360_path: Path | None, counts: dict[str, int], run_id: str,
+    client360_path: Path | None, counts: dict[str, int], phase2: Phase2Counts, run_id: str,
 ) -> Path:
     latest_raw = query_frame(con, "SELECT * FROM call_versions WHERE is_latest=1 ORDER BY lead_number, conversation_timestamp")
     latest = expand_calls(latest_raw.copy())
@@ -583,6 +634,51 @@ def write_workbook(
     errors = query_frame(con, "SELECT * FROM processing_errors ORDER BY created_at DESC")
     unmatched = latest[latest.get("Client_Match_Status", pd.Series(dtype=str)).ne("Matched")].copy() if not latest.empty else latest.copy()
     safe_client360 = client360.drop(columns=["_lead_key", "_client_key"], errors="ignore")
+    actions, closed_actions = action_frame(con)
+    interests = ledger_frame(con, "interest_ledger", {
+        "interest_id": "Interest ID", "client_code": "Client Code", "lead_number": "Lead Number",
+        "first_call_id": "First Call ID", "latest_call_id": "Latest Call ID",
+        "interest_category": "Interest Category", "product_instrument": "Product/Instrument",
+        "interest_description": "Interest Description", "evidence_type": "Evidence Type",
+        "interest_strength": "Interest Strength", "intent_stage": "Intent Stage",
+        "supporting_client_statement": "Supporting Client Statement",
+        "first_detected_date": "First Detected Date", "latest_mention_date": "Latest Mention Date",
+        "mention_count": "Mention Count", "current_status": "Current Status",
+        "recommended_action": "Recommended Action", "action_required": "Action Required",
+        "next_follow_up_date": "Next Follow-up Date",
+    }, INTEREST_COLUMNS)
+    requirements = ledger_frame(con, "requirement_ledger", {
+        "requirement_id": "Requirement ID", "client_code": "Client Code", "lead_number": "Lead Number",
+        "first_call_id": "First Call ID", "latest_call_id": "Latest Call ID",
+        "requirement_category": "Requirement Category", "requirement_description": "Requirement Description",
+        "expected_outcome": "Expected Outcome", "commitment_made": "Commitment Made",
+        "committed_by": "Committed By", "first_raised_date": "First Raised Date",
+        "latest_mention_date": "Latest Mention Date", "due_date": "Due Date",
+        "mention_count": "Mention Count", "current_status": "Current Status",
+        "assigned_team": "Assigned Team", "completion_evidence": "Completion Evidence",
+        "client_confirmation": "Client Confirmation", "closed_date": "Closed Date",
+    }, REQUIREMENT_COLUMNS)
+    issues = ledger_frame(con, "issue_ledger", {
+        "issue_id": "Issue ID", "client_code": "Client Code", "lead_number": "Lead Number",
+        "primary_category": "Primary Category", "subcategory": "Subcategory",
+        "product_platform": "Product/Platform", "standard_issue_title": "Standard Issue Title",
+        "issue_description": "Issue Description", "first_call_id": "First Call ID",
+        "latest_call_id": "Latest Call ID", "first_raised_date": "First Raised Date",
+        "latest_mention_date": "Latest Mention Date", "repeat_count": "Repeat Count",
+        "severity": "Severity", "client_impact": "Client Impact", "current_status": "Current Status",
+        "assigned_team": "Assigned Team", "sla_date": "SLA Date", "root_cause": "Root Cause",
+        "resolution": "Resolution", "resolution_evidence": "Resolution Evidence",
+        "client_confirmation": "Client Confirmation", "closed_date": "Closed Date",
+        "reopened_count": "Reopened Count",
+    }, ISSUE_COLUMNS)
+    history = ledger_frame(con, "ledger_history", {
+        "history_id": "History ID", "source_type": "Source Type", "source_record_id": "Source Record ID",
+        "client_code": "Client Code", "call_id": "Call ID", "event_date": "Event Date",
+        "event_type": "Event Type", "previous_status": "Previous Status", "new_status": "New Status",
+        "new_evidence": "New Evidence", "resolution_statement": "Resolution Statement",
+        "changed_by": "Changed By", "processing_run_id": "Processing Run ID",
+    }, HISTORY_COLUMNS)
+    extractions = query_frame(con, "SELECT * FROM intelligence_extractions ORDER BY created_at DESC")
     summary = pd.DataFrame([
         ("Processing Run ID", run_id),
         ("Client 360 Source", client360_path.name if client360_path else "Not supplied"),
@@ -594,27 +690,35 @@ def write_workbook(
         ("Duplicate Reviews This Run", counts["Review"]),
         ("Errors This Run", counts["Error"]),
         ("Unmatched Current Calls", len(unmatched)),
-        ("Open Actions", 0),
-        ("Phase", "Phase 1 — ingestion, dedupe, versioning and timeline"),
+        ("Calls Interpreted This Run", phase2.processed),
+        ("AI Failures This Run", phase2.failed),
+        ("Interests Extracted This Run", phase2.interests),
+        ("Requirements Extracted This Run", phase2.requirements),
+        ("Issues Extracted This Run", phase2.issues),
+        ("Open Actions", len(actions)),
+        ("Open Issues", int(issues["Closed Date"].fillna("").astype(str).str.strip().eq("").sum()) if not issues.empty else 0),
+        ("Phase", "Phase 2 — structured interpretation, ledgers and unified worklist"),
     ], columns=["Metric", "Value"])
 
     output = paths["current"] / "Sarthi_Client_Intelligence_Current.xlsx"
     with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="dd-mmm-yyyy hh:mm:ss") as writer:
         sheets = {
             "Management_Summary": summary,
-            "Action_Worklist": empty_frame(ACTION_COLUMNS),
+            "Action_Worklist": actions,
             "Client_Call_Timeline": timeline,
             "Common_Call_Master": latest,
             "Call_Processing_Log": logs,
-            "Interest_Ledger": empty_frame(INTEREST_COLUMNS),
-            "Requirement_Ledger": empty_frame(REQUIREMENT_COLUMNS),
-            "Issue_Ledger": empty_frame(ISSUE_COLUMNS),
-            "Ledger_History": empty_frame(HISTORY_COLUMNS),
+            "Interest_Ledger": interests,
+            "Requirement_Ledger": requirements,
+            "Issue_Ledger": issues,
+            "Ledger_History": history,
+            "Closed_Actions": closed_actions,
             "Client_360": safe_client360,
             "Duplicate_Review": dupes,
             "Unmatched_Calls": unmatched,
             "Processing_Errors": errors,
             "Taxonomy_Master": load_taxonomy(paths),
+            "AI_Extraction_Audit": extractions,
             "Call_Versions_Audit": all_versions,
         }
         header = writer.book.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
@@ -636,9 +740,11 @@ def write_workbook(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build the Sarthi Common Call Master and Phase 1 workbook.")
+    parser = argparse.ArgumentParser(description="Build Sarthi Client Intelligence ledgers and worklist.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Production root folder.")
     parser.add_argument("--init", action="store_true", help="Create the folder tree and taxonomy template.")
+    parser.add_argument("--skip-ai", action="store_true", help="Ingest calls without structured AI interpretation.")
+    parser.add_argument("--max-ai-calls", type=int, help="Limit new/changed calls interpreted in this run.")
     return parser.parse_args()
 
 
@@ -646,7 +752,7 @@ def main() -> int:
     args = parse_args()
     paths = initialize(args.root)
     print("=" * 88)
-    print("BIGUL · SARTHI CLIENT INTELLIGENCE · PHASE 1")
+    print("BIGUL · SARTHI CLIENT INTELLIGENCE · PHASE 2")
     print("=" * 88)
     print(f"Root folder : {paths['root']}")
     if args.init:
@@ -660,7 +766,9 @@ def main() -> int:
     con = connect_db(paths["state"] / "sarthi_client_intelligence.db")
     try:
         counts = process_files(con, paths, client_lookup(client360), run_id)
-        output = write_workbook(paths, con, client360, client360_path, counts, run_id)
+        phase2 = Phase2Counts() if args.skip_ai else run_phase2(con, run_id, max_calls=args.max_ai_calls)
+        refresh_action_controls(con)
+        output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
     finally:
         con.close()
     print(f"Inserted    : {counts['Inserted']:,}")
@@ -668,6 +776,9 @@ def main() -> int:
     print(f"Duplicates  : {counts['Duplicate']:,}")
     print(f"For review  : {counts['Review']:,}")
     print(f"Errors      : {counts['Error']:,}")
+    print(f"AI processed: {phase2.processed:,}")
+    print(f"AI failed   : {phase2.failed:,}")
+    print(f"Ledger items: {phase2.interests + phase2.requirements + phase2.issues:,}")
     print(f"Output      : {output}")
     print("DONE")
     return 0
