@@ -626,15 +626,16 @@ def run_phase2(
             intelligence = extractor.extract(payload)
             raw = json.loads(call["row_json"])
             event_date = parse_date(raw.get("Conversation Timestamp"), created)
+            call_interests = call_requirements = call_issues = 0
             for item in intelligence.interests:
                 upsert_interest(con, item, call, event_date, intelligence.call_summary, run_id)
-                counts.interests += 1
+                call_interests += 1
             for item in intelligence.requirements:
                 upsert_requirement(con, item, call, event_date, intelligence.call_summary, run_id)
-                counts.requirements += 1
+                call_requirements += 1
             for item in intelligence.issues:
                 upsert_issue(con, item, call, event_date, intelligence.call_summary, run_id)
-                counts.issues += 1
+                call_issues += 1
             completed = now_text()
             con.execute(
                 "UPDATE intelligence_extractions SET output_json=?,status='Success',completed_at=? WHERE extraction_id=?",
@@ -646,6 +647,9 @@ def run_phase2(
             )
             con.commit()
             counts.processed += 1
+            counts.interests += call_interests
+            counts.requirements += call_requirements
+            counts.issues += call_issues
         except Exception as exc:
             con.rollback()
             con.execute(
