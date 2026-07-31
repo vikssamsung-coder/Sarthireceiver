@@ -3,7 +3,7 @@
 > **Status:** Living source of truth  
 > **Repository:** `vikssamsung-coder/Sarthireceiver`  
 > **Processing engine:** Integrated in `Sarthireceiver/client_intelligence_pipeline`  
-> **Last consolidated:** 27 July 2026  
+> **Last consolidated:** 31 July 2026  
 > **Owner:** Bigul / Sarthi  
 >
 > Update this document whenever a feature, data contract, taxonomy rule, path, dependency, security control, or operating procedure changes.
@@ -14,7 +14,7 @@
 
 ## 1. Purpose
 
-Sarthi Receiver is the local operating and automation layer for Bigul's Sarthi data-processing ecosystem. It receives files, recognizes dump types, saves and normalizes inputs, runs approved processing sequences, schedules MIS jobs, tracks execution, and now provides a controlled interface for the Sarthi Client Intelligence Evaluator.
+Sarthi Receiver is the local operating and automation layer for Bigul's Sarthi data-processing ecosystem. It receives files, recognizes dump types, saves and normalizes inputs, runs approved processing sequences, schedules MIS jobs, tracks execution, and now provides a controlled interface for the integrated Customer Final Evaluation pipeline.
 
 The Client Intelligence service converts account, transaction, and call-evaluation data into client-wise facts, issues, signals, status, transaction flags, intelligence summaries, and action queues. Its optimization principle is:
 
@@ -60,27 +60,27 @@ Sarthireceiver owns:
 - Client Intelligence page
 - controlled Client Intelligence job registry
 - detached job worker
-- evaluator capability detection
-- approved evaluator command construction
+- integrated pipeline capability detection
+- fixed-path, allow-listed command construction
+- bundled Client 360 and Common Call Master processing
 - job logs, cancellation, history, and output downloads
 
-Sarthireceiver must **not** duplicate the evaluator's processing logic.
+### 3.2 Integrated Customer Final Evaluation pipeline
 
-### 3.2 Sarthi_Evaluator
+The bundled `client_intelligence_pipeline` owns:
 
-Sarthi_Evaluator owns:
+- fixed folder initialization under `D:\Customer Final Evaluation`
+- Client 360 extraction from MySQL and the fixed Leads CSV
+- common evaluated-call file ingestion
+- deterministic call IDs, hashes, deduplication, and corrected-call versioning
+- client-wise chronological call timeline
+- SQLite control state and immutable processing logs
+- schema-ready Interest, Requirement, and Issue ledgers
+- the unified Action Worklist and Excel operational output
 
-- `Sarthi_New_Client_360.xlsx` extraction
-- Leads CSV and SQL joins needed for the 360° profile
-- unified call-intelligence extraction
-- AI response caching
-- expansion into fact tables
-- transaction-summary calculation
-- deterministic transaction taxonomy
-- lead/day and client/master aggregation
-- action-candidate generation
-- optional selective AI enrichment for complex actions
-- final Excel outputs
+The Streamlit screen and worker may launch only `SETUP`, `BUILD_360`,
+`PROCESS_CALLS`, and `FULL`. Arbitrary script paths or command text are not
+accepted from the browser.
 
 ### 3.3 Local Windows machine
 
@@ -91,7 +91,6 @@ The office machine provides:
 - Outlook and OneDrive-synced content where configured
 - Python runtime
 - environment secrets
-- local evaluator checkout
 - source and output workbooks
 
 GitHub stores code and documentation. It does not provide access to local drives.
@@ -116,7 +115,7 @@ flowchart TD
     K --> L["Action queue and reports"]
 ```
 
-The Streamlit page launches a detached worker. The worker constructs a command only from an allow-list of modes and runs the separately checked-out evaluator. It records status in SQLite and redirects process output to a per-job log.
+The Streamlit page launches a detached worker. The worker constructs commands only from an allow-list of modes and runs the bundled pipeline. It records status in SQLite and redirects process output to a per-job log.
 
 ---
 
@@ -991,7 +990,7 @@ Every future change should answer:
 - Does it affect incremental processing?
 - Does it affect historical comparability?
 - Does it require a database migration?
-- Does it require Receiver and Evaluator changes together?
+- Does it require coordinated Receiver UI, worker, and pipeline changes?
 - Has README and this document been updated?
 - Have regression and end-to-end tests passed?
 
@@ -1002,7 +1001,7 @@ Every future change should answer:
 A Client Intelligence feature is complete only when:
 
 1. Code is committed to the correct repository.
-2. Receiver and Evaluator compatibility is verified.
+2. Receiver UI, worker, and bundled pipeline compatibility is verified.
 3. No secrets or client data are committed.
 4. Input and output contracts are documented.
 5. Deterministic work is not unnecessarily delegated to AI.
