@@ -7,3 +7,5 @@ psycopg[binary]>=3.1
 streamlit>=1.40
 tomli>=2.0; python_version < "3.11"
 pywin32>=306; platform_system == "Windows"
+openai>=2.0
+pydantic>=2.8
