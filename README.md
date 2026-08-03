@@ -28,41 +28,56 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
   written back after each run).
 - **Neon catalog** — sync the shared `dump_types` list; flags active types with
   no steps yet.
-- **Client Intelligence** — runs the separately checked-out
-  `Sarthi_Evaluator` through a controlled local worker. It can build
-  `Sarthi_New_Client_360.xlsx`, validate/test/run the evaluator, show job
-  history and logs, cancel a running job, and expose completed workbooks.
+- **Client Intelligence** — the integrated Customer Final Evaluation workspace. It refreshes Client 360, ingests evaluated-call files, creates stable call IDs, deduplicates and versions calls, builds the client-wise timeline, and generates the operational workbook.
+- **New Client Profiling** — an operation inside Client Intelligence for current-and-previous-month or rolling-window accounts, with lead attribution, funds, brokerage, margin, top symbols, subscriptions and optional TPP analysis. TPP stays separate from the Client 360 used by call intelligence.
 
 ## Client Intelligence setup
 
-Keep `Sarthireceiver` and `Sarthi_Evaluator` in separate folders. In the
-Receiver sidebar, open **Client Intelligence** and configure:
+The Receiver contains the pipeline; a separate `Sarthi_Evaluator` checkout is
+not required for this section.
+
+Fixed locations:
 
 ```text
-Evaluator folder : C:\Users\Vikrant.Dale\Downloads\Sarthi\Sarthi_Evaluator
-Leads CSV         : D:\Sarthi\Leads\Leads.csv
-Client 360 file   : D:\New call evalution\Transaction and profile\Sarthi_New_Client_360.xlsx
-Output folder     : D:\New call evalution\quality report\Output\Facts
+Working folder : D:\Customer Final Evaluation
+Leads CSV      : D:\Sarthi\Leads\Leads.csv
+Call inputs    : D:\Customer Final Evaluation\01_Input\Call_Analysis
+Client 360     : D:\Customer Final Evaluation\01_Input\Client_360
+Current output : D:\Customer Final Evaluation\04_Output\Current
 ```
 
-Set database credentials as Windows environment variables. In particular,
-`SARTHI_DB_PASSWORD` must be set because a background job cannot answer an
-interactive password prompt. Set `OPENAI_API_KEY` for evaluator modes that use
-AI. Neither secret is stored by Receiver.
+`Leads.csv` remains at its existing location and is read directly. Do not copy
+it into the Customer Final Evaluation folder.
 
-The integration launches only these approved operations:
+Available operations are allow-listed:
 
 ```text
-BUILD_360 · VALIDATE · TEST · FULL · TRANSACTION_ONLY
+SETUP · BUILD_360 · PROCESS_CALLS · FULL
 ```
 
-It never accepts arbitrary scripts or command-line text from the browser.
+Set `SARTHI_DB_PASSWORD` as a Windows environment variable before running
+`BUILD_360` or `FULL`. Call-file processing does not require the MySQL
+password. Place evaluated `.xlsx`, `.xlsm`, or `.csv` files in
+`01_Input\Call_Analysis`, then run **Process evaluated call files**.
+
+The generated workbook is:
+
+`D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
+
+Phase 2 interprets each new or changed call once using the relevant, privacy-minimised Client 360 facts and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates and unchanged source files never use AI. Corrected call versions deterministically rebuild current ledgers so superseded intelligence is removed. Set `OPENAI_API_KEY` for structured extraction; without it, calls are still safely ingested and remain pending. The default model can be overridden with `SARTHI_AI_MODEL`, and the screen limits the maximum calls interpreted per run.
+
+The editable Phase 2 AI prompt is stored separately at `client_intelligence_pipeline/prompts/phase2_call_intelligence.md`. Its content hash is recorded as part of the prompt version, so a prompt change safely queues eligible calls for re-interpretation instead of silently changing behaviour.
+
+Issue closure is controlled: an internal resolution claim becomes `Resolved Pending Confirmation`; final closure requires client confirmation or system/transaction validation.
 
 ## Files
 
 | file | what it is |
 |---|---|
-| `app.py` | the Streamlit app (the four screens). |
+| `app.py` | the Streamlit app and navigation. |
+| `app_client_intelligence.py` | Integrated Client Intelligence screen. |
+| `customer_evaluation_adapter.py` | Fixed-path, allow-listed command adapter. |
+| `client_intelligence_pipeline/` | Client 360 and common-call processing engine. |
 | `dump_flows.py` | registry: recognition + `resolve`, steps, folders, confirmations, catalog. |
 | `extract.py` | auto-detects zip/csv/xlsx: unzips or places the dump into the folder. |
 | `neon_sync.py` | reads the Neon URL from `secrets.toml` and syncs the catalog. |
@@ -84,6 +99,23 @@ The scripts then read the **extracted data file**, which the flow passes as
 `{extract_dir}` for a script that globs.
 
 ## Install & run (Sarthi box)
+
+For normal daily use, double-click:
+
+`start_sarthi.bat`
+
+The launcher uses its own folder automatically, checks/install missing
+dependencies, verifies the integrated Client Intelligence pipeline and prompt,
+then starts the Streamlit app and background Receiver/MIS services. No
+PowerShell commands are required for routine startup.
+
+In **Client Intelligence**, the default operation is **Daily Run - Refresh 360
+and process calls**. Put new evaluated-call files in the fixed Call Analysis
+folder and click **Start daily run**. The daily run also creates any missing
+Customer Evaluation folders, so the separate setup operation is not required
+before routine processing.
+
+For first-time/manual startup:
 
 ```
 pip install streamlit pandas "psycopg[binary]"
