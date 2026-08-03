@@ -14,7 +14,7 @@ MODES = {
     "setup": "Set up Customer Evaluation folders",
     "build_360": "Refresh Sarthi Client 360",
     "process_calls": "Process evaluated call files",
-    "full": "Refresh 360 and process calls",
+    "full": "Daily Run - Refresh 360 and process calls (Recommended)",
 }
 
 
@@ -81,9 +81,12 @@ def _db_password_ready() -> bool:
 def capabilities() -> dict[str, object]:
     code = pipeline_folder()
     p = paths()
+    prompt_file = code / "prompts" / "phase2_call_intelligence.md"
     return {
         "pipeline_folder": code,
-        "pipeline_ready": (code / "run_pipeline.py").is_file(),
+        "pipeline_ready": (code / "run_pipeline.py").is_file() and prompt_file.is_file(),
+        "prompt_file": prompt_file,
+        "prompt_ready": prompt_file.is_file(),
         "extractor_ready": (code / "sarthi_new_clients_360_extract.py").is_file(),
         "leads_ready": FIXED_LEADS_FILE.is_file(),
         "db_password_ready": _db_password_ready(),

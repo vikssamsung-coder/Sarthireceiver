@@ -13,8 +13,17 @@ from run_pipeline import connect_db, process_row
 class FakeExtractor:
     model_name = "fake-structured-extractor"
 
+    def __init__(self):
+        self.last_payload = None
+
     def extract(self, payload):
+        self.last_payload = payload
         summary = payload["call"].get("Summary", "")
+        if "corrected no issue" in summary:
+            return CallIntelligence(
+                call_summary=summary, client_sentiment="Neutral",
+                interests=[], requirements=[], issues=[],
+            )
         if "confirmed fixed" in summary:
             return CallIntelligence(
                 call_summary=summary, client_sentiment="Positive",
@@ -83,12 +92,18 @@ def main() -> None:
         con = connect_db(db)
         try:
             clients = {"1094906": "CLIENT001"}
+            extractor = FakeExtractor()
             process_row(con, raw_call("2026-07-23 17:30:00", "Strategies not showing; demo requested"),
-                        source, 2, "RUN-1", clients)
+                        source, 2, "RUN-1", {})
             con.commit()
-            first = run_phase2(con, "RUN-1", FakeExtractor())
+            context = {
+                "lead": {"1094906": {"Current Total Margin": 25000, "Executed Orders": 0}},
+                "client": {},
+            }
+            first = run_phase2(con, "RUN-1", extractor, client_context=context)
             assert first.processed == 1 and first.issues == 1 and first.requirements == 1 and first.interests == 1
             assert len(table_rows(con, "SELECT * FROM action_register")) == 3
+            assert extractor.last_payload["client_360_facts"]["Current Total Margin"] == 25000
 
             process_row(con, raw_call("2026-07-24 11:00:00", "team says resolved"),
                         source, 3, "RUN-2", clients)
@@ -96,6 +111,7 @@ def main() -> None:
             second = run_phase2(con, "RUN-2", FakeExtractor())
             issues = table_rows(con, "SELECT * FROM issue_ledger")
             assert second.processed == 1 and len(issues) == 1
+            assert issues[0]["client_code"] == "CLIENT001"
             assert issues[0]["current_status"] == "Resolved Pending Confirmation"
             assert issues[0]["repeat_count"] == 2
 
@@ -110,6 +126,25 @@ def main() -> None:
             assert issues[0]["client_confirmation"] == "Client confirmed fixed"
             assert actions[0]["closed_date"] == "2026-07-25"
             assert len(table_rows(con, "SELECT * FROM ledger_history WHERE source_type='Issue'")) == 3
+
+            con.execute("DELETE FROM intelligence_extractions")
+            con.execute("DELETE FROM ledger_history")
+            con.execute("DELETE FROM action_register")
+            con.execute("DELETE FROM interest_ledger")
+            con.execute("DELETE FROM requirement_ledger")
+            con.execute("DELETE FROM issue_ledger")
+            con.execute("DELETE FROM call_versions")
+            con.commit()
+            process_row(con, raw_call("2026-07-26 09:00:00", "Strategies not showing"),
+                        source, 5, "RUN-4", clients)
+            con.commit()
+            run_phase2(con, "RUN-4", FakeExtractor())
+            assert len(table_rows(con, "SELECT * FROM issue_ledger")) == 1
+            process_row(con, raw_call("2026-07-26 09:00:00", "corrected no issue"),
+                        source, 5, "RUN-5", clients)
+            con.commit()
+            run_phase2(con, "RUN-5", FakeExtractor())
+            assert not table_rows(con, "SELECT * FROM issue_ledger")
         finally:
             con.close()
     print("PASS: Phase 2 extraction, matching, pending confirmation, closure, history, and unified actions")

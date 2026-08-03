@@ -2,8 +2,8 @@
 
 > **Status:** Living source of truth  
 > **Repository:** `vikssamsung-coder/Sarthireceiver`  
-> **Processing engine:** Integrated in `Sarthireceiver/client_intelligence_pipeline`  
-> **Last consolidated:** 31 July 2026  
+> **Processing engine:** Integrated in `Sarthireceiver/client_intelligence_pipeline`
+> **Last consolidated:** 31 July 2026
 > **Owner:** Bigul / Sarthi  
 >
 > Update this document whenever a feature, data contract, taxonomy rule, path, dependency, security control, or operating procedure changes.
@@ -76,8 +76,11 @@ The bundled `client_intelligence_pipeline` owns:
 - client-wise chronological call timeline
 - SQLite control state and immutable processing logs
 - structured OpenAI extraction for each new or changed call, with exact duplicates skipped
+- separate Markdown prompt under `client_intelligence_pipeline/prompts`, with content-hash versioning
+- privacy-minimised Client 360 facts supplied as factual context for each matched call
 - permanent Interest, Requirement, and Issue ledgers
-- deterministic matching, status control, ownership, SLA, history, closure, and reopening
+- deterministic stable IDs, matching, status control, ownership, SLA, history, closure, and reopening
+- full deterministic ledger replay from latest successful call versions after a correction
 - the unified Action Worklist for all three source types and Excel operational output
 
 The Streamlit screen and worker may launch only `SETUP`, `BUILD_360`,
@@ -861,9 +864,11 @@ The optimization target is one initial AI call per eligible call summary and zer
 - common call standardization
 - stable call IDs and full-row/content hashes
 - exact duplicate skip
+- unchanged source-file skip on later pipeline runs
 - corrected-call versioning
 - collision review
 - client matching and unmatched routing
+- automatic upgrade of previously unmatched calls after a later Client 360 refresh
 - client-wise chronological timeline
 - SQLite persistence and processing audit
 - current and archived Excel workbooks
@@ -871,14 +876,20 @@ The optimization target is one initial AI call per eligible call summary and zer
 ### Phase 2 — implemented and regression-tested
 
 - one schema-valid structured extraction per new or changed call
+- relevant funds, margin, trade, order, brokerage, and subscription facts in the AI context
+- prompt-version upgrade and retry without discarding the last successful extraction
+- prompt text maintained separately in Markdown rather than embedded in Python
 - permanent Interest, Requirement, and Issue ledgers
-- deterministic client/category/product/description reconciliation
+- deterministic stable IDs and client/category/product/description reconciliation
+- lead-only records upgraded to Client Code without creating duplicate ledgers
+- corrected-call replay so superseded intelligence is removed from current ledgers
 - immutable ledger history
 - one unified Action Worklist covering interests, requirements, and issues
 - default ownership, priority, SLA date, overdue state, and escalation
 - issue repeat count and reopening
 - resolution pending confirmation
 - final closure only after client confirmation or system validation
+- AI cannot author system validation; that signal is reserved for deterministic transaction rules
 - AI extraction audit with model, prompt version, input hash, status, and error
 - run-level AI limit and ingestion-only operation when no key is available
 

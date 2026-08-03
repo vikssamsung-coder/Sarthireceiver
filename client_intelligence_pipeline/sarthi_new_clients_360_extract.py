@@ -20,13 +20,11 @@ MySQL / sarthi_cdp
 
 Files
   - Leads.csv: lead number and campaign attribution
-  - Optional TPP workbook/CSV: Date, Client Code, Amount, Product
 
 Examples
 --------
 python sarthi_new_clients_360_extract.py
 python sarthi_new_clients_360_extract.py --leads "D:\\Sarthi\\Leads.csv"
-python sarthi_new_clients_360_extract.py --tpp "D:\\Sarthi\\TPP Subscription.xlsx"
 python sarthi_new_clients_360_extract.py --window rolling --days 60
 
 Database configuration
@@ -70,12 +68,6 @@ DEFAULT_DB = {
 
 FIXED_LEADS_FILE = Path(r"D:\Sarthi\Leads\Leads.csv")
 DEFAULT_LEADS_CANDIDATES = [FIXED_LEADS_FILE]
-
-DEFAULT_TPP_CANDIDATES = [
-    Path(r"D:\Customer Final Evaluation\01_Input\Sarthi_360_Source\TPP Subscription.xlsx"),
-    Path(r"C:\Users\Vikrant.Dale\Downloads\TPP SUBSCRIPTION Feb23 to Jun26.xlsx"),
-    Path(r"D:\Sarthi\TPP SUBSCRIPTION.xlsx"),
-]
 
 OUTPUT_COLUMNS = [
     "Client Code",
@@ -127,12 +119,6 @@ OUTPUT_COLUMNS = [
     "Subscription Plans",
     "First Subscription Date",
     "Last Subscription Date",
-    "TPP Purchased",
-    "TPP Purchase Count",
-    "TPP Amount",
-    "TPP Products",
-    "First TPP Date",
-    "Last TPP Date",
     "Total Revenue",
 ]
 
@@ -142,7 +128,6 @@ def parse_args() -> argparse.Namespace:
         description="Extract a client-level 360 report for newly opened clients."
     )
     parser.add_argument("--leads", type=Path, help="Path to Leads.csv.")
-    parser.add_argument("--tpp", type=Path, help="Optional TPP Excel/CSV path.")
     parser.add_argument(
         "--output",
         type=Path,
@@ -691,70 +676,6 @@ def select_best_lead_match(base: pd.DataFrame, leads: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(output_rows)
 
 
-TPP_FIELD_ALIASES = {
-    "tpp_date": ["Date", "Purchase Date", "Transaction Date", "Subscription Date"],
-    "client_code": ["Client Code", "ClientCode", "Terminal Code"],
-    "amount": ["Amount", "Revenue", "Subscription Amount", "Amount Paid"],
-    "product": ["Product", "Product Name", "Plan Name", "Plan"],
-}
-
-
-def load_tpp(path: Path | None) -> pd.DataFrame:
-    empty = pd.DataFrame(
-        columns=[
-            "client_code",
-            "tpp_purchase_count",
-            "tpp_amount",
-            "tpp_products",
-            "first_tpp_date",
-            "last_tpp_date",
-        ]
-    )
-    if path is None:
-        return empty
-    if path.suffix.lower() in {".xlsx", ".xls"}:
-        raw = pd.read_excel(path, dtype=str)
-    else:
-        raw = read_csv_flexible(path)
-
-    mapped = {}
-    for target, aliases in TPP_FIELD_ALIASES.items():
-        source = first_existing(raw.columns, aliases)
-        if source is None and target in {"client_code", "amount"}:
-            raise ValueError(
-                f"TPP file is missing required field '{target}'. "
-                f"Available columns: {list(raw.columns)}"
-            )
-        mapped[target] = raw[source] if source else pd.Series("", index=raw.index)
-    tpp = pd.DataFrame(mapped)
-    tpp["client_code"] = tpp["client_code"].map(norm_code)
-    tpp["amount"] = pd.to_numeric(
-        tpp["amount"].astype(str).str.replace(",", "", regex=False),
-        errors="coerce",
-    ).fillna(0)
-    tpp["tpp_date"] = pd.to_datetime(tpp["tpp_date"], errors="coerce").dt.date
-    tpp["product"] = tpp["product"].map(clean_text)
-    tpp = tpp[tpp["client_code"] != ""].drop_duplicates(
-        ["client_code", "tpp_date", "product", "amount"]
-    )
-    if tpp.empty:
-        return empty
-
-    def join_unique(series: pd.Series) -> str:
-        return ", ".join(sorted({clean_text(v) for v in series if clean_text(v)}))
-
-    return (
-        tpp.groupby("client_code", as_index=False)
-        .agg(
-            tpp_purchase_count=("amount", "size"),
-            tpp_amount=("amount", "sum"),
-            tpp_products=("product", join_unique),
-            first_tpp_date=("tpp_date", "min"),
-            last_tpp_date=("tpp_date", "max"),
-        )
-    )
-
-
 def normalize_key(frame: pd.DataFrame) -> pd.DataFrame:
     if "client_code" in frame.columns:
         frame = frame.copy()
@@ -770,7 +691,6 @@ def build_client_detail(
     margin: pd.DataFrame,
     symbols: pd.DataFrame,
     subscriptions: pd.DataFrame,
-    tpp: pd.DataFrame,
     as_of: date,
 ) -> pd.DataFrame:
     result = base.copy()
@@ -781,7 +701,6 @@ def build_client_detail(
         margin,
         symbols,
         subscriptions,
-        tpp,
     ):
         result = result.merge(normalize_key(frame), on="client_code", how="left")
 
@@ -802,8 +721,6 @@ def build_client_detail(
         "traded_value",
         "subscription_purchase_count",
         "subscription_amount",
-        "tpp_purchase_count",
-        "tpp_amount",
     ]
     for col in numeric_cols:
         if col not in result:
@@ -813,7 +730,6 @@ def build_client_detail(
     text_cols = [
         "top_symbols",
         "subscription_plans",
-        "tpp_products",
         "lead_match_method",
         *[
             key
@@ -840,13 +756,9 @@ def build_client_detail(
     result["subscription_purchased"] = (
         result["subscription_purchase_count"] > 0
     ).map({True: "Yes", False: "No"})
-    result["tpp_purchased"] = (result["tpp_purchase_count"] > 0).map(
-        {True: "Yes", False: "No"}
-    )
     result["total_revenue"] = (
         result["gross_brokerage"]
         + result["subscription_amount"]
-        + result["tpp_amount"]
     )
 
     rename = {
@@ -899,12 +811,6 @@ def build_client_detail(
         "subscription_plans": "Subscription Plans",
         "first_subscription_date": "First Subscription Date",
         "last_subscription_date": "Last Subscription Date",
-        "tpp_purchased": "TPP Purchased",
-        "tpp_purchase_count": "TPP Purchase Count",
-        "tpp_amount": "TPP Amount",
-        "tpp_products": "TPP Products",
-        "first_tpp_date": "First TPP Date",
-        "last_tpp_date": "Last TPP Date",
         "total_revenue": "Total Revenue",
     }
     result = result.rename(columns=rename)
@@ -932,8 +838,6 @@ def build_summary(detail: pd.DataFrame) -> pd.DataFrame:
         ("Gross Brokerage", detail["Gross Brokerage"].sum()),
         ("Subscription Buyers", int((detail["Subscription Purchase Count"] > 0).sum())),
         ("Subscription Revenue", detail["Subscription Amount"].sum()),
-        ("TPP Buyers", int((detail["TPP Purchase Count"] > 0).sum())),
-        ("TPP Revenue", detail["TPP Amount"].sum()),
         ("Total Revenue", detail["Total Revenue"].sum()),
     ]
     return pd.DataFrame(rows, columns=["Metric", "Value"])
@@ -942,7 +846,6 @@ def build_summary(detail: pd.DataFrame) -> pd.DataFrame:
 def build_data_quality(
     detail: pd.DataFrame,
     leads_path: Path,
-    tpp_path: Path | None,
     margin_date: date | None,
     start_date: date,
     end_date: date,
@@ -953,7 +856,6 @@ def build_data_quality(
         ("Account Opening Window Start", start_date),
         ("Account Opening Window End", end_date),
         ("Leads File", str(leads_path)),
-        ("TPP File", str(tpp_path) if tpp_path else "Not supplied / not found"),
         ("Latest Global Margin Date", margin_date or "No margin snapshot"),
         ("Client Rows", len(detail)),
         ("Unique Client Codes", detail["Client Code"].nunique()),
@@ -963,7 +865,6 @@ def build_data_quality(
             "Latest Margin Snapshot Missing",
             int((detail["Margin Snapshot Available"] == "No").sum()),
         ),
-        ("TPP Status", "Loaded" if tpp_path else "TPP columns set to zero"),
         (
             "Top Symbol Rule",
             "Top 5 symbols by executed orders; traded value breaks ties",
@@ -1058,7 +959,6 @@ def write_excel(
                 "Current Tradeable Margin",
                 "Traded Value",
                 "Subscription Amount",
-                "TPP Amount",
                 "Total Revenue",
             ]:
                 idx = detail.columns.get_loc(col)
@@ -1068,7 +968,6 @@ def write_excel(
                 "Trading Days",
                 "Executed Orders",
                 "Subscription Purchase Count",
-                "TPP Purchase Count",
             ]:
                 idx = detail.columns.get_loc(col)
                 detail_ws.set_column(idx, idx, 13, integer_fmt)
@@ -1081,8 +980,6 @@ def write_excel(
                 "Current Margin Date",
                 "First Subscription Date",
                 "Last Subscription Date",
-                "First TPP Date",
-                "Last TPP Date",
             ]:
                 idx = detail.columns.get_loc(col)
                 detail_ws.set_column(idx, idx, 14, date_fmt)
@@ -1147,18 +1044,10 @@ def main() -> int:
         ["Leads.csv", "leads.csv", "Leads*.csv", "leads*.csv"],
         required=True,
     )
-    tpp_path = resolve_path(
-        args.tpp,
-        DEFAULT_TPP_CANDIDATES,
-        ["*TPP*SUBSCRIPTION*.xlsx", "*TPP*.xlsx", "*TPP*.csv"],
-        required=False,
-    )
-
     print("=" * 88)
     print("BIGUL · SARTHI CDP · NEW CLIENT 360 EXTRACT")
     print("=" * 88)
     print(f"Leads file : {leads_path}")
-    print(f"TPP file   : {tpp_path or 'Not found; TPP columns will be zero'}")
 
     connection = pymysql.connect(**get_db_config())
     try:
@@ -1190,8 +1079,6 @@ def main() -> int:
 
     leads = load_leads(leads_path)
     lead_matches = select_best_lead_match(base, leads)
-    tpp = load_tpp(tpp_path)
-
     detail = build_client_detail(
         base=base,
         lead_matches=lead_matches,
@@ -1200,14 +1087,12 @@ def main() -> int:
         margin=margin,
         symbols=symbols,
         subscriptions=subscriptions,
-        tpp=tpp,
         as_of=as_of,
     )
     summary = build_summary(detail)
     quality = build_data_quality(
         detail=detail,
         leads_path=leads_path,
-        tpp_path=tpp_path,
         margin_date=margin_date,
         start_date=start_date,
         end_date=end_date,

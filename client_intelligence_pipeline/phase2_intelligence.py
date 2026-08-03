@@ -1,6 +1,7 @@
 """Phase 2 structured call interpretation and deterministic ledger reconciliation."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,6 +39,9 @@ DEFAULT_OWNERS = {
     "Communication": "Customer Service/RM",
     "Other": "Customer Service/RM",
 }
+
+PROMPT_VERSION_PREFIX = "phase2-v2-client360"
+PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "phase2_call_intelligence.md"
 
 
 class StrictModel(BaseModel):
@@ -87,7 +92,7 @@ class IssueItem(StrictModel):
     resolution: str = ""
     resolution_evidence: str = ""
     client_confirmation: str = ""
-    system_validation: str = ""
+    system_validation: str = ""  # retained for stored-output compatibility; ignored in Phase 2
 
 
 class CallIntelligence(StrictModel):
@@ -98,16 +103,19 @@ class CallIntelligence(StrictModel):
     issues: list[IssueItem] = Field(default_factory=list)
 
 
-SYSTEM_PROMPT = """You extract operational client intelligence from Bigul call-analysis data.
-Return only facts supported by the supplied call. Separate every distinct issue, requirement,
-and interest. Do not treat an employee's claim of resolution as client confirmation. Use
-status_signal values Mentioned, Progress, ResolvedReported, ClientConfirmed, SystemValidated,
-or Reopened. Use only these issue primary categories: Technical, Order & Trading, Funds,
-RMS & Margin, Account & KYC, Subscription, Algo/API, Research/Product, Support/Service,
-Charges, Communication, Other. Severity must be Critical, High, Medium, or Low. Interest
-action disposition should be Action Required, Follow-up Later, Nurture, Monitor,
-No Immediate Action, Completed, or Not Interested. Preserve short evidence statements;
-do not invent amounts, dates, promises, products, or outcomes."""
+def load_system_prompt() -> str:
+    if not PROMPT_PATH.is_file():
+        raise FileNotFoundError(f"Phase 2 prompt file not found: {PROMPT_PATH}")
+    prompt = PROMPT_PATH.read_text(encoding="utf-8").strip()
+    if not prompt:
+        raise RuntimeError(f"Phase 2 prompt file is empty: {PROMPT_PATH}")
+    return prompt
+
+
+def system_prompt_version(prompt: str | None = None) -> str:
+    content = prompt if prompt is not None else load_system_prompt()
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+    return f"{PROMPT_VERSION_PREFIX}-{digest}"
 
 
 class Extractor(Protocol):
@@ -129,7 +137,7 @@ class OpenAIExtractor:
         response = self.client.responses.parse(
             model=self.model_name,
             input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": load_system_prompt()},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
             ],
             text_format=CallIntelligence,
@@ -156,6 +164,11 @@ def normal(value: Any) -> str:
 
 def ident(prefix: str) -> str:
     return f"{prefix}-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:12].upper()}"
+
+
+def stable_ident(prefix: str, *parts: Any) -> str:
+    payload = "|".join(normal(part) for part in parts)
+    return f"{prefix}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:20].upper()}"
 
 
 def similarity(left: Any, right: Any) -> float:
@@ -269,6 +282,8 @@ def client_identity(row: dict[str, Any]) -> tuple[str, str]:
 
 
 def identity_where(client_code: str, lead_number: str) -> tuple[str, tuple[str, ...]]:
+    if client_code and lead_number:
+        return "(client_code=? OR lead_number=?)", (client_code, lead_number)
     if client_code:
         return "client_code=?", (client_code,)
     return "client_code='' AND lead_number=?", (lead_number,)
@@ -305,7 +320,8 @@ def add_history(
 ) -> None:
     con.execute(
         "INSERT INTO ledger_history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (ident("HIST"), source_type, source_id, client_code, call_id, event_date,
+        (stable_ident("HIST", source_type, source_id, call_id, event_type, previous, new),
+         source_type, source_id, client_code, call_id, event_date,
          event_type, previous, new, evidence, resolution, "Pipeline", run_id),
     )
 
@@ -341,28 +357,34 @@ def upsert_issue(
     owner = clean(item.assigned_team) or DEFAULT_OWNERS.get(item.primary_category, "Customer Service/RM")
     severity = item.severity if item.severity in ISSUE_SLA_DAYS else "Medium"
     has_client = bool(clean(item.client_confirmation))
-    has_system = bool(clean(item.system_validation))
+    # Phase 2 never accepts AI-authored system validation. A future deterministic
+    # transaction validator may supply this signal outside the extraction schema.
+    has_system = False
     old_status = clean(match.get("current_status")) if match else ""
     new_status, event_type = issue_status(old_status, item.status_signal, has_client, has_system)
     closed = event_date if new_status == "Closed" else ""
-    evidence = clean(item.system_validation) or clean(item.resolution_evidence) or clean(item.client_statement)
+    evidence = clean(item.resolution_evidence) or clean(item.client_statement)
     resolution = clean(item.resolution)
     if match:
         issue_id = match["issue_id"]
         reopened = int(match.get("reopened_count") or 0) + (1 if event_type == "Reopened" else 0)
         con.execute(
-            """UPDATE issue_ledger SET latest_call_id=?,latest_mention_date=?,repeat_count=?,
+            """UPDATE issue_ledger SET client_code=?,lead_number=?,latest_call_id=?,latest_mention_date=?,repeat_count=?,
             severity=?,client_impact=?,current_status=?,assigned_team=?,resolution=?,
             resolution_evidence=?,client_confirmation=?,closed_date=?,reopened_count=?,updated_at=?
             WHERE issue_id=?""",
-            (call["call_unique_id"], event_date, int(match.get("repeat_count") or 1) + 1,
+            (client_code or match.get("client_code", ""), lead or match.get("lead_number", ""),
+             call["call_unique_id"], event_date, int(match.get("repeat_count") or 1) + 1,
              severity, item.client_impact, new_status, owner, resolution or match.get("resolution", ""),
              evidence or match.get("resolution_evidence", ""),
              clean(item.client_confirmation) or match.get("client_confirmation", ""), closed,
              reopened, now_text(), issue_id),
         )
     else:
-        issue_id = ident("ISS")
+        issue_id = stable_ident(
+            "ISS", lead or client_code, item.primary_category, item.subcategory,
+            item.product_platform, item.standard_title,
+        )
         sla = (datetime.fromisoformat(event_date[:10]) + timedelta(days=ISSUE_SLA_DAYS[severity])).date().isoformat()
         match_key = "|".join(map(normal, [item.primary_category, item.subcategory, item.product_platform, item.standard_title]))
         values = (
@@ -417,16 +439,17 @@ def upsert_requirement(
     if match:
         record_id = match["requirement_id"]
         con.execute(
-            """UPDATE requirement_ledger SET latest_call_id=?,latest_mention_date=?,due_date=?,
+            """UPDATE requirement_ledger SET client_code=?,lead_number=?,latest_call_id=?,latest_mention_date=?,due_date=?,
             mention_count=?,current_status=?,assigned_team=?,completion_evidence=?,
             client_confirmation=?,closed_date=?,updated_at=? WHERE requirement_id=?""",
-            (call["call_unique_id"], event_date, due, int(match.get("mention_count") or 1) + 1,
+            (client_code or match.get("client_code", ""), lead or match.get("lead_number", ""),
+             call["call_unique_id"], event_date, due, int(match.get("mention_count") or 1) + 1,
              status, owner, clean(item.completion_evidence) or match.get("completion_evidence", ""),
              clean(item.client_confirmation) or match.get("client_confirmation", ""), closed,
              now_text(), record_id),
         )
     else:
-        record_id = ident("REQ")
+        record_id = stable_ident("REQ", lead or client_code, item.category, item.description)
         key = "|".join(map(normal, [item.category, item.description]))
         con.execute(
             "INSERT INTO requirement_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -458,6 +481,9 @@ def interest_status(old: str, item: InterestItem) -> tuple[str, str]:
         "New", "Exploring", "Interested", "Ready to Act", "Converted", "Nurture",
         "Follow-up Later", "Not Interested", "Lost", "Closed",
     } else "Exploring"
+    progression = {"New": 0, "Exploring": 1, "Interested": 2, "Ready to Act": 3, "Converted": 4}
+    if old in progression and stage in progression and progression[old] > progression[stage]:
+        stage = old
     return stage or old or "Exploring", "Mentioned Again" if old else "Created"
 
 
@@ -478,18 +504,22 @@ def upsert_interest(
     if match:
         record_id = match["interest_id"]
         con.execute(
-            """UPDATE interest_ledger SET latest_call_id=?,interest_strength=?,intent_stage=?,
+            """UPDATE interest_ledger SET client_code=?,lead_number=?,latest_call_id=?,interest_strength=?,intent_stage=?,
             supporting_client_statement=?,latest_mention_date=?,mention_count=?,current_status=?,
             recommended_action=?,action_required=?,next_follow_up_date=?,updated_at=?
             WHERE interest_id=?""",
-            (call["call_unique_id"], item.strength, item.intent_stage,
+            (client_code or match.get("client_code", ""), lead or match.get("lead_number", ""),
+             call["call_unique_id"], item.strength, item.intent_stage,
              item.client_statement or match.get("supporting_client_statement", ""), event_date,
              int(match.get("mention_count") or 1) + 1, status,
              item.recommended_action or match.get("recommended_action", ""), action_required,
              followup, now_text(), record_id),
         )
     else:
-        record_id = ident("INT")
+        record_id = stable_ident(
+            "INT", lead or client_code, item.category, item.product_instrument,
+            item.description,
+        )
         key = "|".join(map(normal, [item.category, item.product_instrument, item.description]))
         con.execute(
             "INSERT INTO interest_ledger VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -526,19 +556,21 @@ def upsert_action(
         old = existing[0]
         previous = clean(old.get("latest_action_taken")) or clean(old.get("previous_action"))
         con.execute(
-            """UPDATE action_register SET source_call_id=?,latest_mention_date=?,category=?,
+            """UPDATE action_register SET client_code=?,lead_number=?,source_call_id=?,latest_mention_date=?,category=?,
             subcategory=?,product_platform=?,item_summary=?,client_statement=?,current_status=?,
             action_disposition=?,priority=?,recommended_action=?,assigned_team=?,due_date=?,
             next_follow_up_date=?,previous_action=?,success_measure=?,closure_evidence=?,
             closed_date=?,repeat_count=?,latest_call_summary=?,updated_at=? WHERE action_id=?""",
-            (call["call_unique_id"], event_date, category, subcategory, product, summary,
+            (client_code or old.get("client_code", ""), lead or old.get("lead_number", ""),
+             call["call_unique_id"], event_date, category, subcategory, product, summary,
              statement, status, disposition, priority, recommendation, team, due_date,
              due_date, previous, success_measure, closure_evidence, closed_date, repeat_count,
              call_summary, now_text(), old["action_id"]),
         )
         return
     values = (
-        ident("ACT"), client_code, lead, "", source_type, record_id, call["call_unique_id"],
+        stable_ident("ACT", source_type, record_id), client_code, lead, "", source_type,
+        record_id, call["call_unique_id"],
         event_date, event_date, category, subcategory, product, summary, statement, "",
         status, disposition, priority, recommendation, team, "", due_date, due_date, 0,
         "", "", success_measure, "", closure_evidence, closed_date, repeat_count, "None",
@@ -549,7 +581,10 @@ def upsert_action(
     )
 
 
-def call_payload(con: sqlite3.Connection, call: dict[str, Any]) -> dict[str, Any]:
+def call_payload(
+    con: sqlite3.Connection, call: dict[str, Any],
+    client_context: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     raw = json.loads(call["row_json"])
     client_code, lead = client_identity(call)
     relevant = {
@@ -564,9 +599,14 @@ def call_payload(con: sqlite3.Connection, call: dict[str, Any]) -> dict[str, Any
     for name, table in (("interests", "interest_ledger"), ("requirements", "requirement_ledger"), ("issues", "issue_ledger")):
         rows = current_records(con, table, client_code, lead)
         open_items[name] = [row for row in rows if clean(row.get("current_status")) in OPEN_STATUSES]
+    context = client_context or {"lead": {}, "client": {}}
+    facts = context.get("client", {}).get(client_code, {}) if client_code else {}
+    if not facts and lead:
+        facts = context.get("lead", {}).get(lead, {})
     return {
         "call": relevant,
         "client_identity": {"client_code": client_code, "lead_number": lead},
+        "client_360_facts": facts,
         "existing_open_items": open_items,
     }
 
@@ -581,13 +621,53 @@ class Phase2Counts:
     issues: int = 0
 
 
+def rebuild_ledgers(con: sqlite3.Connection, run_id: str) -> None:
+    """Replay successful latest-call extractions so corrected versions replace old effects."""
+    rows = table_rows(
+        con,
+        """SELECT cv.*, ie.output_json
+        FROM call_versions cv
+        JOIN intelligence_extractions ie ON ie.call_version_id=cv.call_version_id
+        WHERE ie.status='Success' AND TRIM(ie.output_json)<>''
+          AND cv.call_version_id=(
+              SELECT cv2.call_version_id
+              FROM call_versions cv2
+              JOIN intelligence_extractions ie2 ON ie2.call_version_id=cv2.call_version_id
+              WHERE cv2.call_unique_id=cv.call_unique_id
+                AND ie2.status='Success' AND TRIM(ie2.output_json)<>''
+              ORDER BY cv2.version_number DESC
+              LIMIT 1
+          )
+        ORDER BY cv.conversation_timestamp, cv.call_unique_id""",
+    )
+    con.execute("DELETE FROM ledger_history")
+    con.execute("DELETE FROM action_register")
+    con.execute("DELETE FROM interest_ledger")
+    con.execute("DELETE FROM requirement_ledger")
+    con.execute("DELETE FROM issue_ledger")
+    for call in rows:
+        intelligence = CallIntelligence.model_validate_json(call["output_json"])
+        raw = json.loads(call["row_json"])
+        event_date = parse_date(raw.get("Conversation Timestamp"), now_text())
+        for item in intelligence.interests:
+            upsert_interest(con, item, call, event_date, intelligence.call_summary, run_id)
+        for item in intelligence.requirements:
+            upsert_requirement(con, item, call, event_date, intelligence.call_summary, run_id)
+        for item in intelligence.issues:
+            upsert_issue(con, item, call, event_date, intelligence.call_summary, run_id)
+    con.commit()
+
+
 def run_phase2(
     con: sqlite3.Connection, run_id: str, extractor: Extractor | None = None,
     max_calls: int | None = None,
+    client_context: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> Phase2Counts:
     ensure_schema(con)
+    active_prompt_version = system_prompt_version()
     if extractor is None:
         if not os.getenv("OPENAI_API_KEY"):
+            rebuild_ledgers(con, run_id)
             return Phase2Counts()
         extractor = OpenAIExtractor()
     pending = table_rows(
@@ -595,16 +675,18 @@ def run_phase2(
         """SELECT cv.* FROM call_versions cv
         LEFT JOIN intelligence_extractions ie ON ie.call_version_id=cv.call_version_id
         WHERE cv.is_latest=1 AND cv.processing_status IN ('Inserted','Updated')
-          AND (ie.call_version_id IS NULL OR ie.status='Failed')
+          AND (ie.call_version_id IS NULL OR ie.status='Failed' OR ie.prompt_version<>?)
         ORDER BY cv.conversation_timestamp, cv.call_version_id""",
+        (active_prompt_version,),
     )
     if max_calls is not None:
         pending = pending[:max(0, max_calls)]
     counts = Phase2Counts()
+    rebuild_ledgers(con, run_id)
     for call in pending:
         extraction_id = ident("EXT")
         created = now_text()
-        payload = call_payload(con, call)
+        payload = call_payload(con, call, client_context)
         input_hash = __import__("hashlib").sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
         ).hexdigest()
@@ -620,26 +702,28 @@ def run_phase2(
                     "INSERT INTO intelligence_extractions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (extraction_id, call["call_version_id"], call["call_unique_id"],
                      call.get("lead_number", ""), call.get("matched_client_code", ""),
-                     extractor.model_name, "phase2-v1", input_hash, "", "Processing", "",
+                     extractor.model_name, active_prompt_version, input_hash, "", "Processing", "",
                      run_id, created, ""),
                 )
             intelligence = extractor.extract(payload)
             raw = json.loads(call["row_json"])
             event_date = parse_date(raw.get("Conversation Timestamp"), created)
-            call_interests = call_requirements = call_issues = 0
             for item in intelligence.interests:
                 upsert_interest(con, item, call, event_date, intelligence.call_summary, run_id)
-                call_interests += 1
             for item in intelligence.requirements:
                 upsert_requirement(con, item, call, event_date, intelligence.call_summary, run_id)
-                call_requirements += 1
             for item in intelligence.issues:
                 upsert_issue(con, item, call, event_date, intelligence.call_summary, run_id)
-                call_issues += 1
+            call_interests = len(intelligence.interests)
+            call_requirements = len(intelligence.requirements)
+            call_issues = len(intelligence.issues)
             completed = now_text()
             con.execute(
-                "UPDATE intelligence_extractions SET output_json=?,status='Success',completed_at=? WHERE extraction_id=?",
-                (intelligence.model_dump_json(), completed, extraction_id),
+                """UPDATE intelligence_extractions SET model_name=?,prompt_version=?,input_hash=?,
+                output_json=?,status='Success',error_message='',processing_run_id=?,completed_at=?
+                WHERE extraction_id=?""",
+                (extractor.model_name, active_prompt_version, input_hash,
+                 intelligence.model_dump_json(), run_id, completed, extraction_id),
             )
             con.execute(
                 "UPDATE processing_log SET ai_result='Success',ledger_result='Updated' WHERE detected_version_id=?",
@@ -652,19 +736,27 @@ def run_phase2(
             counts.issues += call_issues
         except Exception as exc:
             con.rollback()
-            con.execute(
-                "INSERT OR REPLACE INTO intelligence_extractions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (extraction_id, call["call_version_id"], call["call_unique_id"],
-                 call.get("lead_number", ""), call.get("matched_client_code", ""),
-                 extractor.model_name, "phase2-v1", input_hash, "", "Failed", str(exc),
-                 run_id, created, now_text()),
-            )
+            if existing and existing[0].get("status") == "Success":
+                con.execute(
+                    """UPDATE intelligence_extractions SET error_message=?,processing_run_id=?,
+                    completed_at=? WHERE extraction_id=?""",
+                    (f"Upgrade attempt failed: {exc}", run_id, now_text(), extraction_id),
+                )
+            else:
+                con.execute(
+                    "INSERT OR REPLACE INTO intelligence_extractions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (extraction_id, call["call_version_id"], call["call_unique_id"],
+                     call.get("lead_number", ""), call.get("matched_client_code", ""),
+                     extractor.model_name, active_prompt_version, input_hash, "", "Failed", str(exc),
+                     run_id, created, now_text()),
+                )
             con.execute(
                 "UPDATE processing_log SET ai_result='Failed',ledger_result='Error',error_message=? WHERE detected_version_id=?",
                 (str(exc), call["call_version_id"]),
             )
             con.commit()
             counts.failed += 1
+    rebuild_ledgers(con, run_id)
     return counts
 
 

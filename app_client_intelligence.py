@@ -80,12 +80,13 @@ def screen(db_path) -> None:
     )
     st.caption("Leads.csv stays in its existing location and is read directly; it is not copied.")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Pipeline", "Ready" if caps["pipeline_ready"] else "Missing")
     c2.metric("Leads.csv", "Ready" if caps["leads_ready"] else "Missing")
     c3.metric("Call files", int(caps["call_file_count"]))
     c4.metric("Client 360", "Ready" if caps["client360_file"] else "Not built")
     c5.metric("AI extraction", "Ready" if caps["openai_ready"] else "Ingest only")
+    c6.metric("AI prompt", "Ready" if caps["prompt_ready"] else "Missing")
     if not caps["db_password_ready"]:
         st.warning(
             "No database password was found for the Client 360 refresh. Configure "
@@ -102,7 +103,12 @@ def screen(db_path) -> None:
     st.subheader("Run")
     labels = list(MODES.values())
     by_label = {label: key for key, label in MODES.items()}
-    selected = st.selectbox("Operation", labels)
+    selected = st.selectbox(
+        "Operation",
+        labels,
+        index=labels.index(MODES["full"]),
+        help="Daily Run also creates any missing folders automatically.",
+    )
     mode = by_label[selected]
     config = {"python_exe": sys.executable}
     if mode in {"process_calls", "full"}:
@@ -140,7 +146,8 @@ def screen(db_path) -> None:
                           or not caps["leads_ready"]
                           or not caps["db_password_ready"]))
     )
-    if st.button("Start operation", type="primary", disabled=disabled):
+    button_label = "Start daily run" if mode == "full" else "Start operation"
+    if st.button(button_label, type="primary", disabled=disabled):
         job_id = jobs.create_job(mode, config, db_path)
         _launch(job_id, db_path)
         st.success(f"Client Intelligence job #{job_id} started.")

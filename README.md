@@ -63,7 +63,9 @@ The generated workbook is:
 
 `D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
 
-Phase 2 interprets each new or changed call once and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates never use AI. Set `OPENAI_API_KEY` for structured extraction; without it, calls are still safely ingested and remain pending. The default model can be overridden with `SARTHI_AI_MODEL`, and the screen limits the maximum calls interpreted per run.
+Phase 2 interprets each new or changed call once using the relevant, privacy-minimised Client 360 facts and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates and unchanged source files never use AI. Corrected call versions deterministically rebuild current ledgers so superseded intelligence is removed. Set `OPENAI_API_KEY` for structured extraction; without it, calls are still safely ingested and remain pending. The default model can be overridden with `SARTHI_AI_MODEL`, and the screen limits the maximum calls interpreted per run.
+
+The editable Phase 2 AI prompt is stored separately at `client_intelligence_pipeline/prompts/phase2_call_intelligence.md`. Its content hash is recorded as part of the prompt version, so a prompt change safely queues eligible calls for re-interpretation instead of silently changing behaviour.
 
 Issue closure is controlled: an internal resolution claim becomes `Resolved Pending Confirmation`; final closure requires client confirmation or system/transaction validation.
 
@@ -96,6 +98,23 @@ The scripts then read the **extracted data file**, which the flow passes as
 `{extract_dir}` for a script that globs.
 
 ## Install & run (Sarthi box)
+
+For normal daily use, double-click:
+
+`start_sarthi.bat`
+
+The launcher uses its own folder automatically, checks/install missing
+dependencies, verifies the integrated Client Intelligence pipeline and prompt,
+then starts the Streamlit app and background Receiver/MIS services. No
+PowerShell commands are required for routine startup.
+
+In **Client Intelligence**, the default operation is **Daily Run - Refresh 360
+and process calls**. Put new evaluated-call files in the fixed Call Analysis
+folder and click **Start daily run**. The daily run also creates any missing
+Customer Evaluation folders, so the separate setup operation is not required
+before routine processing.
+
+For first-time/manual startup:
 
 ```
 pip install streamlit pandas "psycopg[binary]"

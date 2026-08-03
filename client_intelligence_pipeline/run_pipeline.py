@@ -24,6 +24,18 @@ from phase2_intelligence import Phase2Counts, ensure_schema, refresh_action_cont
 DEFAULT_ROOT = Path(r"D:\Customer Final Evaluation")
 SUPPORTED = {".xlsx", ".xlsm", ".csv"}
 
+CLIENT_360_FACT_FIELDS = (
+    "Opening Date", "Account Age Days", "Account Status", "Lead Source",
+    "Source Campaign", "Funds Collected", "Funds Paid Out", "Net Funds",
+    "First Fund Date", "Last Fund Date", "Gross Brokerage", "Brokerage MTD",
+    "Brokerage Last 30D", "First Trade Date", "Last Trade Date", "Trading Days",
+    "Current Margin Date", "Current Total Margin", "Current Tradeable Margin",
+    "Margin Snapshot Available", "Top Symbols", "Executed Orders", "Traded Value",
+    "Subscription Purchased", "Subscription Purchase Count", "Subscription Amount",
+    "Subscription Plans", "First Subscription Date", "Last Subscription Date",
+    "Total Revenue",
+)
+
 SYSTEM_COLUMNS = [
     "Call_Unique_ID", "Call_Version_ID", "Version_Number", "Processing_Run_ID",
     "Source_File_Name", "Source_File_Date", "Source_Row_Number", "Source_Row_Hash",
@@ -317,6 +329,16 @@ def connect_db(path: Path) -> sqlite3.Connection:
             traceback TEXT,
             created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS ingested_files (
+            source_file_name TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_modified_at TEXT NOT NULL,
+            processing_run_id TEXT NOT NULL,
+            processed_at TEXT NOT NULL,
+            row_count INTEGER NOT NULL,
+            PRIMARY KEY (source_file_name, file_hash)
+        );
         """
     )
     ensure_schema(con)
@@ -385,6 +407,58 @@ def client_lookup(frame: pd.DataFrame) -> dict[str, str]:
         clean_id(row["_lead_key"]): clean_id(row.get("_client_key", ""))
         for _, row in frame.iterrows() if clean_id(row["_lead_key"])
     }
+
+
+def refresh_client_matches(con: sqlite3.Connection, clients: dict[str, str]) -> int:
+    """Upgrade previously unmatched calls when a later Client 360 refresh resolves the lead."""
+    changed = 0
+    for lead, client_code in clients.items():
+        cursor = con.execute(
+            """UPDATE call_versions
+            SET matched_client_code=?,client_match_status='Matched'
+            WHERE lead_number=?
+              AND (matched_client_code<>? OR client_match_status<>'Matched')""",
+            (client_code, lead, client_code),
+        )
+        changed += max(0, cursor.rowcount)
+    con.commit()
+    return changed
+
+
+def _json_value(value: Any) -> Any:
+    if value is None or (not isinstance(value, (list, dict)) and pd.isna(value)):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    return value.item() if hasattr(value, "item") else value
+
+
+def client_context_lookup(frame: pd.DataFrame) -> dict[str, dict[str, dict[str, Any]]]:
+    """Build a privacy-minimised fact lookup for Phase 2; contact data is excluded."""
+    lookup: dict[str, dict[str, dict[str, Any]]] = {"lead": {}, "client": {}}
+    if frame.empty:
+        return lookup
+    for _, row in frame.iterrows():
+        facts = {
+            field: _json_value(row.get(field))
+            for field in CLIENT_360_FACT_FIELDS
+            if field in frame.columns and clean_text(row.get(field))
+        }
+        lead = clean_id(row.get("_lead_key", ""))
+        client = clean_id(row.get("_client_key", ""))
+        if lead:
+            lookup["lead"][lead] = facts
+        if client:
+            lookup["client"][client] = facts
+    return lookup
+
+
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def log_import(con: sqlite3.Connection, values: dict[str, Any]) -> None:
@@ -501,13 +575,20 @@ def process_row(
 
 
 def process_files(con: sqlite3.Connection, paths: dict[str, Path], clients: dict[str, str], run_id: str) -> dict[str, int]:
-    counts = {"Inserted": 0, "Updated": 0, "Duplicate": 0, "Review": 0, "Error": 0}
+    counts = {"Inserted": 0, "Updated": 0, "Duplicate": 0, "Review": 0, "Error": 0, "SkippedFiles": 0}
     files = sorted(
         [p for p in paths["calls"].iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED and not p.name.startswith("~$")],
         key=lambda p: (p.stat().st_mtime, p.name.lower()),
     )
     for source in files:
         try:
+            source_hash = file_hash(source)
+            if con.execute(
+                "SELECT 1 FROM ingested_files WHERE source_file_name=? AND file_hash=?",
+                (source.name, source_hash),
+            ).fetchone():
+                counts["SkippedFiles"] += 1
+                continue
             frame = read_tabular(source)
             for idx, (_, series) in enumerate(frame.iterrows(), start=2):
                 try:
@@ -520,6 +601,15 @@ def process_files(con: sqlite3.Connection, paths: dict[str, Path], clients: dict
                         "INSERT INTO processing_errors VALUES (?,?,?,?,?,?,?,?)",
                         (str(uuid.uuid4()), run_id, source.name, idx, type(exc).__name__, str(exc), traceback.format_exc(), now),
                     )
+            stat = source.stat()
+            con.execute(
+                "INSERT INTO ingested_files VALUES (?,?,?,?,?,?,?)",
+                (
+                    source.name, source_hash, stat.st_size,
+                    datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+                    run_id, datetime.now().astimezone().isoformat(timespec="seconds"), len(frame),
+                ),
+            )
             con.commit()
         except Exception as exc:
             counts["Error"] += 1
@@ -689,6 +779,8 @@ def write_workbook(
         ("Exact Duplicates This Run", counts["Duplicate"]),
         ("Duplicate Reviews This Run", counts["Review"]),
         ("Errors This Run", counts["Error"]),
+        ("Unchanged Input Files Skipped", counts["SkippedFiles"]),
+        ("Existing Call Matches Refreshed", counts.get("RefreshedMatches", 0)),
         ("Unmatched Current Calls", len(unmatched)),
         ("Calls Interpreted This Run", phase2.processed),
         ("AI Failures This Run", phase2.failed),
@@ -765,8 +857,14 @@ def main() -> int:
     print(f"Client rows : {len(client360):,}")
     con = connect_db(paths["state"] / "sarthi_client_intelligence.db")
     try:
-        counts = process_files(con, paths, client_lookup(client360), run_id)
-        phase2 = Phase2Counts() if args.skip_ai else run_phase2(con, run_id, max_calls=args.max_ai_calls)
+        clients = client_lookup(client360)
+        refreshed_matches = refresh_client_matches(con, clients)
+        counts = process_files(con, paths, clients, run_id)
+        counts["RefreshedMatches"] = refreshed_matches
+        phase2 = Phase2Counts() if args.skip_ai else run_phase2(
+            con, run_id, max_calls=args.max_ai_calls,
+            client_context=client_context_lookup(client360),
+        )
         refresh_action_controls(con)
         output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
     finally:
@@ -776,6 +874,8 @@ def main() -> int:
     print(f"Duplicates  : {counts['Duplicate']:,}")
     print(f"For review  : {counts['Review']:,}")
     print(f"Errors      : {counts['Error']:,}")
+    print(f"Files skipped: {counts['SkippedFiles']:,}")
+    print(f"Matches refreshed: {refreshed_matches:,}")
     print(f"AI processed: {phase2.processed:,}")
     print(f"AI failed   : {phase2.failed:,}")
     print(f"Ledger items: {phase2.interests + phase2.requirements + phase2.issues:,}")
