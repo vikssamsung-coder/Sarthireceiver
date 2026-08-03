@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -72,6 +73,42 @@ def list_jobs(db_path: str | Path, limit: int = 100) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def _process_exists(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+
+
+def recover_orphaned_jobs(db_path: str | Path, grace_seconds: int = 120) -> int:
+    """Release UI locks left behind when a detached worker never starts or exits."""
+    now = datetime.now()
+    recovered = 0
+    for job in list_jobs(db_path, 500):
+        if job["status"] not in {"queued", "running", "cancel_requested"}:
+            continue
+        stamp = job.get("started_at") or job.get("created_at")
+        try:
+            age = (now - datetime.fromisoformat(stamp)).total_seconds()
+        except (TypeError, ValueError):
+            age = grace_seconds + 1
+        if age <= grace_seconds:
+            continue
+        if job.get("pid") and _process_exists(job["pid"]):
+            continue
+        final_status = "cancelled" if job["status"] == "cancel_requested" else "failed"
+        update_job(
+            job["id"], db_path, status=final_status, finished_at=_now(),
+            return_code=-1,
+            message="Previous worker is no longer running. The job lock was cleared automatically.",
+        )
+        recovered += 1
+    return recovered
+
+
 def update_job(job_id: int, db_path: str | Path, **fields) -> None:
     allowed = {
         "status", "command_json", "pid", "started_at", "finished_at",
@@ -97,4 +134,3 @@ def request_cancel(job_id: int, db_path: str | Path) -> bool:
         message="Cancellation requested by user.",
     )
     return True
-
