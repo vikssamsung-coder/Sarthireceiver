@@ -88,8 +88,10 @@ def screen(db_path) -> None:
     c5.metric("AI extraction", "Ready" if caps["openai_ready"] else "Ingest only")
     if not caps["db_password_ready"]:
         st.warning(
-            "Set the Windows environment variable SARTHI_DB_PASSWORD before running "
-            "a Client 360 refresh. Call-file processing does not require it."
+            "No database password was found for the Client 360 refresh. Configure "
+            "SARTHI_DB_PASSWORD (recommended), common_config.DB_CONFIG, or the "
+            "extractor's local DB_PASSWORD fallback. Call-file processing does not "
+            "require it."
         )
     if not caps["openai_ready"]:
         st.info(
