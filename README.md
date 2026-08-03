@@ -29,6 +29,7 @@ still does the Outlook read, reassembly, SHA and dedup; this makes the
 - **Neon catalog** — sync the shared `dump_types` list; flags active types with
   no steps yet.
 - **Client Intelligence** — the integrated Customer Final Evaluation workspace. It refreshes Client 360, ingests evaluated-call files, creates stable call IDs, deduplicates and versions calls, builds the client-wise timeline, and generates the operational workbook.
+- **New Client Profiling** — an operation inside Client Intelligence for current-and-previous-month or rolling-window accounts, with lead attribution, funds, brokerage, margin, top symbols, subscriptions and optional TPP analysis. TPP stays separate from the Client 360 used by call intelligence.
 
 ## Client Intelligence setup
 

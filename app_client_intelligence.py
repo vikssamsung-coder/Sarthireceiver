@@ -21,7 +21,7 @@ def _settings_path(db_path) -> Path:
 
 
 def _load_settings(db_path) -> dict:
-    data = {"window": "calendar", "days": 60, "max_ai_calls": 100}
+    data = {"window": "calendar", "days": 60, "max_ai_calls": 100, "tpp_path": ""}
     try:
         data.update(json.loads(_settings_path(db_path).read_text(encoding="utf-8")))
     except Exception:
@@ -119,7 +119,7 @@ def screen(db_path) -> None:
         )
         if mode == "process_calls":
             _save_settings(db_path, {**saved, "max_ai_calls": int(config["max_ai_calls"])})
-    if mode in {"build_360", "full"}:
+    if mode in {"build_360", "full", "profile_new_clients"}:
         default_window = saved.get("window", "calendar")
         window = st.radio(
             "Account-opening window", ["calendar", "rolling"], horizontal=True,
@@ -134,17 +134,32 @@ def screen(db_path) -> None:
         _save_settings(db_path, {
             "window": window, "days": int(config.get("days", 60)),
             "max_ai_calls": int(config.get("max_ai_calls", saved.get("max_ai_calls", 100))),
+            "tpp_path": str(saved.get("tpp_path", "")),
+        })
+    if mode == "profile_new_clients":
+        config["tpp_path"] = st.text_input(
+            "Optional TPP subscription file",
+            value=str(saved.get("tpp_path", "")),
+            placeholder=r"D:\Sarthi\TPP SUBSCRIPTION.xlsx",
+            help="Leave blank to let the report search its standard locations.",
+        ).strip()
+        _save_settings(db_path, {
+            **saved,
+            "window": config.get("window", "calendar"),
+            "days": int(config.get("days", saved.get("days", 60))),
+            "tpp_path": config["tpp_path"],
         })
 
     history = jobs.list_jobs(db_path, 100)
     active = [row for row in history if row["status"] in {
         "queued", "running", "cancel_requested"}]
-    needs_360 = mode in {"build_360", "full"}
+    needs_360 = mode in {"build_360", "full", "profile_new_clients"}
     disabled = (
         bool(active) or not caps["pipeline_ready"]
         or (needs_360 and (not caps["extractor_ready"]
                           or not caps["leads_ready"]
                           or not caps["db_password_ready"]))
+        or (mode == "profile_new_clients" and not caps["profiling_ready"])
     )
     button_label = "Start daily run" if mode == "full" else "Start operation"
     if st.button(button_label, type="primary", disabled=disabled):

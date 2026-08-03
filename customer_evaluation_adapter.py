@@ -15,6 +15,7 @@ MODES = {
     "build_360": "Refresh Sarthi Client 360",
     "process_calls": "Process evaluated call files",
     "full": "Daily Run - Refresh 360 and process calls (Recommended)",
+    "profile_new_clients": "Build New Client Profiling Report",
 }
 
 
@@ -33,6 +34,10 @@ def paths() -> dict[str, Path]:
         "logs": FIXED_ROOT / "05_Logs",
         "review": FIXED_ROOT / "06_Review",
     }
+
+
+def profiling_output() -> Path:
+    return paths()["current"] / "Sarthi_New_Client_Profiling_Current.xlsx"
 
 
 def _latest(folder: Path, patterns: tuple[str, ...]) -> Path | None:
@@ -88,6 +93,7 @@ def capabilities() -> dict[str, object]:
         "prompt_file": prompt_file,
         "prompt_ready": prompt_file.is_file(),
         "extractor_ready": (code / "sarthi_new_clients_360_extract.py").is_file(),
+        "profiling_ready": (code / "new_client_profiling_report.py").is_file(),
         "leads_ready": FIXED_LEADS_FILE.is_file(),
         "db_password_ready": _db_password_ready(),
         "openai_ready": bool(os.getenv("OPENAI_API_KEY")),
@@ -125,6 +131,34 @@ def _build_360_command(python_exe: str, config: dict) -> list[str]:
     return command
 
 
+def _build_profiling_command(python_exe: str, config: dict) -> list[str]:
+    code = pipeline_folder()
+    report = code / "new_client_profiling_report.py"
+    if not report.is_file():
+        raise FileNotFoundError(f"New Client Profiling report not found: {report}")
+    if not FIXED_LEADS_FILE.is_file():
+        raise FileNotFoundError(
+            f"Leads.csv was not found at its fixed location: {FIXED_LEADS_FILE}"
+        )
+    if not _db_password_ready():
+        raise RuntimeError(
+            "No database password is available to the background profiling report. "
+            "Configure SARTHI_DB_PASSWORD, common_config.DB_CONFIG, or the Client "
+            "360 extractor's local DB_PASSWORD fallback."
+        )
+    command = [
+        python_exe, "-u", str(report),
+        "--leads", str(FIXED_LEADS_FILE),
+        "--output", str(profiling_output()),
+    ]
+    if config.get("window") == "rolling":
+        command += ["--window", "rolling", "--days", str(max(1, int(config.get("days", 60))))]
+    tpp_path = str(config.get("tpp_path") or "").strip()
+    if tpp_path:
+        command += ["--tpp", tpp_path]
+    return command
+
+
 def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
     """Return only approved commands; browser input can never select a script path."""
     if mode not in MODES:
@@ -146,8 +180,10 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
         commands = [setup, _build_360_command(python_exe, config)]
     elif mode == "process_calls":
         commands = [setup, process]
-    else:
+    elif mode == "full":
         commands = [setup, _build_360_command(python_exe, config), process]
+    else:
+        commands = [setup, _build_profiling_command(python_exe, config)]
     return commands, code
 
 
@@ -156,5 +192,6 @@ def output_files() -> list[Path]:
     candidates = [
         p["current"] / "Sarthi_Client_Intelligence_Current.xlsx",
         p["client360"] / "Sarthi_New_Client_360.xlsx",
+        profiling_output(),
     ]
     return [path for path in candidates if path.is_file()]

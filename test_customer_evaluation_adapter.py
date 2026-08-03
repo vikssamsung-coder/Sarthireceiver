@@ -17,6 +17,11 @@ def main() -> None:
         full, _ = adapter.build_commands(
             "full", {"python_exe": "python", "window": "rolling", "days": 45}
         )
+        profile, _ = adapter.build_commands(
+            "profile_new_clients",
+            {"python_exe": "python", "window": "rolling", "days": 60,
+             "tpp_path": r"D:\Sarthi\TPP.xlsx"},
+        )
     assert len(setup) == 1
     assert len(process) == 2
     assert "--max-ai-calls" in limited[-1] and "125" in limited[-1]
@@ -25,6 +30,10 @@ def main() -> None:
     assert str(adapter.FIXED_ROOT) in flat
     assert str(adapter.FIXED_LEADS_FILE) in flat
     assert "--days" in flat and "45" in flat
+    assert len(profile) == 2
+    profile_flat = [item for command in profile for item in command]
+    assert "new_client_profiling_report.py" in " ".join(profile_flat)
+    assert "--tpp" in profile_flat and r"D:\Sarthi\TPP.xlsx" in profile_flat
     try:
         adapter.build_commands("arbitrary_script", {})
     except ValueError:
