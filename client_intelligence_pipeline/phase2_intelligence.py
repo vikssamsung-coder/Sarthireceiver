@@ -1034,19 +1034,30 @@ class Phase2Counts:
 
 
 def rebuild_ledgers(con: sqlite3.Connection, run_id: str) -> None:
-    """Replay successful latest-call extractions so corrected versions replace old effects."""
+    """Replay only currently eligible Sarthi 360 extractions into operational ledgers.
+
+    Successful historical extractions remain in the technical audit tables, but a
+    call can affect interests, requirements, issues or actions only while its
+    current match has both a lead number and a client code.
+    """
     rows = table_rows(
         con,
         """SELECT cv.*, ie.output_json
         FROM call_versions cv
         JOIN intelligence_extractions ie ON ie.call_version_id=cv.call_version_id
         WHERE ie.status='Success' AND TRIM(ie.output_json)<>''
+          AND cv.client_match_status='Matched'
+          AND TRIM(COALESCE(cv.matched_client_code,''))<>''
+          AND TRIM(COALESCE(cv.lead_number,''))<>''
           AND cv.call_version_id=(
               SELECT cv2.call_version_id
               FROM call_versions cv2
               JOIN intelligence_extractions ie2 ON ie2.call_version_id=cv2.call_version_id
               WHERE cv2.call_unique_id=cv.call_unique_id
                 AND ie2.status='Success' AND TRIM(ie2.output_json)<>''
+                AND cv2.client_match_status='Matched'
+                AND TRIM(COALESCE(cv2.matched_client_code,''))<>''
+                AND TRIM(COALESCE(cv2.lead_number,''))<>''
               ORDER BY cv2.version_number DESC
               LIMIT 1
           )
