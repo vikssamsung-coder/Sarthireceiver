@@ -465,24 +465,64 @@ def client_lookup(frame: pd.DataFrame) -> dict[str, str]:
         return {}
     return {
         clean_id(row["_lead_key"]): clean_id(row.get("_client_key", ""))
-        for _, row in frame.iterrows() if clean_id(row["_lead_key"])
+        for _, row in frame.iterrows()
+        if clean_id(row["_lead_key"]) and clean_id(row.get("_client_key", ""))
     }
 
 
 def refresh_client_matches(con: sqlite3.Connection, clients: dict[str, str]) -> int:
-    """Upgrade previously unmatched calls when a later Client 360 refresh resolves the lead."""
-    changed = 0
-    for lead, client_code in clients.items():
-        cursor = con.execute(
-            """UPDATE call_versions
-            SET matched_client_code=?,client_match_status='Matched'
-            WHERE lead_number=?
-              AND (matched_client_code<>? OR client_match_status<>'Matched')""",
-            (client_code, lead, client_code),
-        )
-        changed += max(0, cursor.rowcount)
+    """Synchronise every stored call to the current, complete Client 360 mapping.
+
+    A historical match is not permanent: when a lead disappears from the rolling
+    Sarthi 360 population, or its current row has no client code, the call must be
+    removed from operational intelligence on the next rebuild.
+    """
+    con.execute(
+        """CREATE TEMP TABLE IF NOT EXISTS active_client_360_map (
+            lead_number TEXT PRIMARY KEY, client_code TEXT NOT NULL
+        )"""
+    )
+    con.execute("DELETE FROM active_client_360_map")
+    con.executemany(
+        "INSERT INTO active_client_360_map (lead_number,client_code) VALUES (?,?)",
+        clients.items(),
+    )
+    before = con.total_changes
+    con.execute(
+        """UPDATE call_versions
+        SET matched_client_code='',
+            client_match_status=CASE
+                WHEN TRIM(COALESCE(lead_number,''))='' THEN 'Missing Lead Number'
+                ELSE 'No Client 360 Match'
+            END
+        WHERE (TRIM(COALESCE(matched_client_code,''))<>'' OR client_match_status='Matched')
+          AND NOT EXISTS (
+              SELECT 1 FROM active_client_360_map active
+              WHERE active.lead_number=call_versions.lead_number
+                AND active.client_code=call_versions.matched_client_code
+          )"""
+    )
+    con.execute(
+        """UPDATE call_versions
+        SET matched_client_code=(
+                SELECT active.client_code FROM active_client_360_map active
+                WHERE active.lead_number=call_versions.lead_number
+            ),
+            client_match_status='Matched'
+        WHERE EXISTS (
+                SELECT 1 FROM active_client_360_map active
+                WHERE active.lead_number=call_versions.lead_number
+            )
+          AND (
+                client_match_status<>'Matched'
+                OR matched_client_code<>(
+                    SELECT active.client_code FROM active_client_360_map active
+                    WHERE active.lead_number=call_versions.lead_number
+                )
+          )"""
+    )
     con.commit()
-    return changed
+    return max(0, con.total_changes - before)
 
 
 def _json_value(value: Any) -> Any:
@@ -547,8 +587,8 @@ def process_row(
     ).fetchone()
     columns = [d[0] for d in con.execute("SELECT * FROM call_versions LIMIT 0").description]
     old = dict(zip(columns, existing)) if existing else None
-    match_status = "Matched" if lead and lead in clients else ("No Client 360 Match" if lead else "Missing Lead Number")
     client_code = clients.get(lead, "")
+    match_status = "Matched" if lead and client_code else ("No Client 360 Match" if lead else "Missing Lead Number")
     ts_text = ts.isoformat(sep=" ") if ts is not None else ""
 
     collision = None
@@ -828,11 +868,39 @@ def write_workbook(
         "new_evidence": "New Evidence", "resolution_statement": "Resolution Statement",
         "changed_by": "Changed By", "processing_run_id": "Processing Run ID",
     }, HISTORY_COLUMNS)
-    extractions = query_frame(con, "SELECT * FROM intelligence_extractions ORDER BY created_at DESC")
-    extraction_attempts = query_frame(
-        con, "SELECT * FROM intelligence_extraction_attempts ORDER BY created_at DESC, attempt_sequence"
+    extractions = query_frame(
+        con,
+        """SELECT ie.*,
+               cv.client_match_status AS current_client_match_status,
+               cv.matched_client_code AS current_matched_client_code,
+               CASE WHEN cv.client_match_status='Matched'
+                          AND TRIM(COALESCE(cv.matched_client_code,''))<>''
+                          AND TRIM(COALESCE(cv.lead_number,''))<>''
+                    THEN 'Yes' ELSE 'No' END AS operationally_eligible
+        FROM intelligence_extractions ie
+        JOIN call_versions cv ON cv.call_version_id=ie.call_version_id
+        ORDER BY ie.created_at DESC""",
     )
-    successful_extractions = extractions[extractions.get("status", pd.Series(dtype=str)).eq("Success")]
+    extraction_attempts = query_frame(
+        con,
+        """SELECT ia.*,
+               cv.client_match_status AS current_client_match_status,
+               cv.matched_client_code AS current_matched_client_code,
+               CASE WHEN cv.client_match_status='Matched'
+                          AND TRIM(COALESCE(cv.matched_client_code,''))<>''
+                          AND TRIM(COALESCE(cv.lead_number,''))<>''
+                    THEN 'Yes' ELSE 'No' END AS operationally_eligible
+        FROM intelligence_extraction_attempts ia
+        JOIN call_versions cv ON cv.call_version_id=ia.call_version_id
+        ORDER BY ia.created_at DESC, ia.attempt_sequence""",
+    )
+    successful_extractions = extractions[
+        extractions.get("status", pd.Series(dtype=str)).eq("Success")
+        & extractions.get("operationally_eligible", pd.Series(dtype=str)).eq("Yes")
+    ]
+    eligible_attempts = extraction_attempts[
+        extraction_attempts.get("operationally_eligible", pd.Series(dtype=str)).eq("Yes")
+    ]
 
     def token_total(column: str) -> int:
         if column not in successful_extractions:
@@ -840,17 +908,17 @@ def write_workbook(
         return int(pd.to_numeric(successful_extractions[column], errors="coerce").fillna(0).sum())
 
     def attempt_total(model_role: str, column: str) -> float:
-        if extraction_attempts.empty or column not in extraction_attempts:
+        if eligible_attempts.empty or column not in eligible_attempts:
             return 0.0
-        selected = extraction_attempts[
-            extraction_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role)
+        selected = eligible_attempts[
+            eligible_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role)
         ]
         return float(pd.to_numeric(selected[column], errors="coerce").fillna(0).sum())
 
     def attempt_count(model_role: str) -> int:
-        if extraction_attempts.empty:
+        if eligible_attempts.empty:
             return 0
-        return int(extraction_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role).sum())
+        return int(eligible_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role).sum())
 
     total_tokens = token_total("total_tokens")
     token_counted_calls = int(
@@ -871,6 +939,11 @@ def write_workbook(
         ("Unchanged Input Files Skipped", counts["SkippedFiles"]),
         ("Existing Call Matches Refreshed", counts.get("RefreshedMatches", 0)),
         ("Unmatched Current Calls", len(unmatched)),
+        ("Operationally Eligible Successful AI Extractions", len(successful_extractions)),
+        ("Historical/Unmatched Successful AI Extractions Excluded", int(
+            extractions.get("status", pd.Series(dtype=str)).eq("Success").sum()
+            - len(successful_extractions)
+        )),
         ("Calls Interpreted This Run", phase2.processed),
         ("Sarthi 360 Calls Eligible for AI", phase2.eligible),
         ("Non-Sarthi-360 Calls Excluded from AI", phase2.skipped),
