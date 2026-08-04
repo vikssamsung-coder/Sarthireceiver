@@ -738,14 +738,17 @@ elif ss.screen == "Settings":
 
     st.subheader("Update from GitHub")
     st.markdown(f"**Repo:** {REPO}")
-    st.caption("Downloads the latest code over HTTPS — no git, no install (the same way "
-               "PMD updates itself). Your database and secrets are left untouched. After it "
-               "finishes, restart the app so the new code loads: Ctrl+C in the terminal, then "
-               "`run_app.bat` (or `streamlit run app.py`).")
+    st.caption(
+        "Downloads the complete Receiver and Call Evaluation code from the GitHub main "
+        "branch and overwrites the installed application files. Obsolete managed code is "
+        "removed. Databases, credentials, Customer Final Evaluation inputs, and generated "
+        "outputs are preserved. After it finishes, restart the app so the new code loads: "
+        "Ctrl+C in the terminal, then `run_app.bat` (or `streamlit run app.py`)."
+    )
 
     if st.button("Update now", type="primary"):
         import updater
-        with st.spinner("Downloading latest from GitHub…"):
+        with st.spinner("Downloading and replacing the complete application code…"):
             try:
                 files = updater.update_from_github(str(appdir), log=lambda m: None)
                 st.success(f"Updated {len(files)} file(s). Now restart the app to load the new code.")
