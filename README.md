@@ -64,7 +64,11 @@ The generated workbook is:
 
 `D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
 
-Phase 2 interprets each new or changed call once using the relevant, privacy-minimised Client 360 facts and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates and unchanged source files never use AI. Corrected call versions deterministically rebuild current ledgers so superseded intelligence is removed. Set `OPENAI_API_KEY` for structured extraction; without it, calls are still safely ingested and remain pending. The default model can be overridden with `SARTHI_AI_MODEL`, and the screen limits the maximum calls interpreted per run.
+Phase 2 interprets each new or changed Sarthi 360-matched call using the relevant, privacy-minimised Client 360 facts and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates, unmatched calls, and unchanged source files never use AI. Corrected call versions deterministically rebuild current ledgers so superseded intelligence is removed. Set `OPENAI_API_KEY` for structured extraction; without it, calls are safely ingested and remain pending.
+
+The evaluator uses a hybrid model policy by default: `gpt-5.6-luna` handles the first pass, while `gpt-5.6-terra` independently re-evaluates critical, complaint/churn-risk, recurring-outage, ambiguous, or low-confidence calls. Configure it with `SARTHI_AI_LUNA_MODEL`, `SARTHI_AI_TERRA_MODEL`, and `SARTHI_AI_TERRA_CONFIDENCE_THRESHOLD` (default `0.80`). Set `SARTHI_AI_HYBRID_ENABLED=false` to use the legacy single-model `SARTHI_AI_MODEL` path. The screen limits the maximum calls interpreted per run.
+
+Every model attempt is stored separately with response ID, token usage, processing time, status, escalation reason, and estimated USD cost. A failed Terra review falls back to the successful Luna extraction and remains visibly flagged for follow-up.
 
 The editable Phase 2 AI prompt is stored separately at `client_intelligence_pipeline/prompts/phase2_call_intelligence.md`. Its content hash is recorded as part of the prompt version, so a prompt change safely queues eligible calls for re-interpretation instead of silently changing behaviour.
 

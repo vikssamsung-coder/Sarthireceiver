@@ -259,7 +259,9 @@ Only the Client 360 date window and maximum AI calls per run are user settings. 
 
 ### 7.3 Capability and cost controls
 
-The UI reports pipeline, Leads CSV, Client 360, call-file, database-password, and OpenAI-key readiness. `OPENAI_API_KEY` enables structured extraction; without it, ingestion remains safe and intelligence stays pending. `SARTHI_AI_MODEL` may override the default model. The maximum new/changed calls per run is configurable; exact duplicates never consume AI.
+The UI reports pipeline, Leads CSV, Client 360, call-file, database-password, and OpenAI-key readiness. `OPENAI_API_KEY` enables structured extraction; without it, ingestion remains safe and intelligence stays pending. AI evaluation is limited by default to calls matched to both a Sarthi 360 lead number and Client Code; unmatched call-analysis rows are excluded before any API request.
+
+The default hybrid policy uses `gpt-5.6-luna` for every first pass and escalates supported critical-risk, ambiguity, or low-confidence cases to `gpt-5.6-terra`. Environment controls are `SARTHI_AI_LUNA_MODEL`, `SARTHI_AI_TERRA_MODEL`, `SARTHI_AI_TERRA_CONFIDENCE_THRESHOLD` (default `0.80`), and `SARTHI_AI_HYBRID_ENABLED`. If hybrid mode is disabled, `SARTHI_AI_MODEL` controls the single model. The maximum eligible calls per run remains configurable; exact duplicates never consume AI.
 
 ### 7.4 Job lifecycle
 
@@ -875,7 +877,9 @@ The optimization target is one initial AI call per eligible call summary and zer
 
 ### Phase 2 — implemented and regression-tested
 
-- one schema-valid structured extraction per new or changed call
+- one schema-valid Luna extraction per new or changed eligible call
+- deterministic Terra escalation for critical incidents, complaint or churn threats, recurring/broad outages, financial-loss allegations, low confidence, and explicit model-review flags
+- independent Terra correction with safe Luna fallback if the Terra request fails
 - relevant funds, margin, trade, order, brokerage, and subscription facts in the AI context
 - prompt-version upgrade and retry without discarding the last successful extraction
 - prompt text maintained separately in Markdown rather than embedded in Python
@@ -890,12 +894,13 @@ The optimization target is one initial AI call per eligible call summary and zer
 - resolution pending confirmation
 - final closure only after client confirmation or system validation
 - AI cannot author system validation; that signal is reserved for deterministic transaction rules
-- AI extraction audit with model, prompt version, input hash, status, and error
+- call-level AI extraction audit with final model, prompt version, input hash, status, escalation decision, token totals, timing, and estimated cost
+- per-attempt audit for Luna and Terra response IDs, outputs, tokens, timing, failures, and estimated cost
 - run-level AI limit and ingestion-only operation when no key is available
 
 ### Current workbook
 
-`Sarthi_Client_Intelligence_Current.xlsx` contains Management Summary, Action Worklist, Client Call Timeline, Common Call Master, Processing Log, all three ledgers, Ledger History, Closed Actions, Client 360, duplicate/unmatched/error reviews, Taxonomy Master, AI Extraction Audit, and Call Versions Audit.
+`Sarthi_Client_Intelligence_Current.xlsx` contains Management Summary, Action Worklist, Client Call Timeline, Common Call Master, Processing Log, all three ledgers, Ledger History, Closed Actions, Client 360, duplicate/unmatched/error reviews, Taxonomy Master, AI Extraction Audit, AI Model Attempts, and Call Versions Audit.
 
 ## 18. Recommended next phases
 

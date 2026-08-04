@@ -769,6 +769,35 @@ def write_workbook(
         "changed_by": "Changed By", "processing_run_id": "Processing Run ID",
     }, HISTORY_COLUMNS)
     extractions = query_frame(con, "SELECT * FROM intelligence_extractions ORDER BY created_at DESC")
+    extraction_attempts = query_frame(
+        con, "SELECT * FROM intelligence_extraction_attempts ORDER BY created_at DESC, attempt_sequence"
+    )
+    successful_extractions = extractions[extractions.get("status", pd.Series(dtype=str)).eq("Success")]
+
+    def token_total(column: str) -> int:
+        if column not in successful_extractions:
+            return 0
+        return int(pd.to_numeric(successful_extractions[column], errors="coerce").fillna(0).sum())
+
+    def attempt_total(model_role: str, column: str) -> float:
+        if extraction_attempts.empty or column not in extraction_attempts:
+            return 0.0
+        selected = extraction_attempts[
+            extraction_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role)
+        ]
+        return float(pd.to_numeric(selected[column], errors="coerce").fillna(0).sum())
+
+    def attempt_count(model_role: str) -> int:
+        if extraction_attempts.empty:
+            return 0
+        return int(extraction_attempts.get("model_role", pd.Series(dtype=str)).eq(model_role).sum())
+
+    total_tokens = token_total("total_tokens")
+    token_counted_calls = int(
+        pd.to_numeric(
+            successful_extractions.get("total_tokens", pd.Series(dtype=float)), errors="coerce"
+        ).fillna(0).gt(0).sum()
+    )
     summary = pd.DataFrame([
         ("Processing Run ID", run_id),
         ("Client 360 Source", client360_path.name if client360_path else "Not supplied"),
@@ -783,7 +812,30 @@ def write_workbook(
         ("Existing Call Matches Refreshed", counts.get("RefreshedMatches", 0)),
         ("Unmatched Current Calls", len(unmatched)),
         ("Calls Interpreted This Run", phase2.processed),
+        ("Sarthi 360 Calls Eligible for AI", phase2.eligible),
+        ("Non-Sarthi-360 Calls Excluded from AI", phase2.skipped),
+        ("Eligible Calls Deferred", phase2.deferred),
         ("AI Failures This Run", phase2.failed),
+        ("Calls Escalated to Terra This Run", phase2.terra_reviews),
+        ("Terra Failures with Luna Fallback This Run", phase2.terra_failures),
+        ("Token-counted Successful Calls", token_counted_calls),
+        ("Input Tokens", token_total("input_tokens")),
+        ("Cached Input Tokens", token_total("cached_input_tokens")),
+        ("Cache Write Tokens", token_total("cache_write_tokens")),
+        ("Output Tokens", token_total("output_tokens")),
+        ("Reasoning Tokens", token_total("reasoning_tokens")),
+        ("Total Tokens", total_tokens),
+        ("Average Tokens per Counted Call", round(total_tokens / token_counted_calls, 2) if token_counted_calls else 0),
+        ("Luna First-pass Attempts", attempt_count("Luna First Pass")),
+        ("Luna Total Tokens", int(attempt_total("Luna First Pass", "total_tokens"))),
+        ("Luna Estimated Cost (USD)", round(attempt_total("Luna First Pass", "estimated_cost_usd"), 6)),
+        ("Terra Review Attempts", attempt_count("Terra Review")),
+        ("Terra Total Tokens", int(attempt_total("Terra Review", "total_tokens"))),
+        ("Terra Estimated Cost (USD)", round(attempt_total("Terra Review", "estimated_cost_usd"), 6)),
+        ("Estimated API Cost (USD)", round(float(pd.to_numeric(
+            successful_extractions.get("estimated_cost_usd", pd.Series(dtype=float)),
+            errors="coerce",
+        ).fillna(0).sum()), 6)),
         ("Interests Extracted This Run", phase2.interests),
         ("Requirements Extracted This Run", phase2.requirements),
         ("Issues Extracted This Run", phase2.issues),
@@ -811,6 +863,7 @@ def write_workbook(
             "Processing_Errors": errors,
             "Taxonomy_Master": load_taxonomy(paths),
             "AI_Extraction_Audit": extractions,
+            "AI_Model_Attempts": extraction_attempts,
             "Call_Versions_Audit": all_versions,
         }
         header = writer.book.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
@@ -837,6 +890,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init", action="store_true", help="Create the folder tree and taxonomy template.")
     parser.add_argument("--skip-ai", action="store_true", help="Ingest calls without structured AI interpretation.")
     parser.add_argument("--max-ai-calls", type=int, help="Limit new/changed calls interpreted in this run.")
+    parser.add_argument(
+        "--include-unmatched-calls", action="store_true",
+        help="Also evaluate calls not linked to both a Sarthi 360 lead number and client code.",
+    )
     return parser.parse_args()
 
 
@@ -864,6 +921,7 @@ def main() -> int:
         phase2 = Phase2Counts() if args.skip_ai else run_phase2(
             con, run_id, max_calls=args.max_ai_calls,
             client_context=client_context_lookup(client360),
+            sarthi_360_only=not args.include_unmatched_calls,
         )
         refresh_action_controls(con)
         output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
@@ -877,7 +935,12 @@ def main() -> int:
     print(f"Files skipped: {counts['SkippedFiles']:,}")
     print(f"Matches refreshed: {refreshed_matches:,}")
     print(f"AI processed: {phase2.processed:,}")
+    print(f"AI eligible : {phase2.eligible:,}")
+    print(f"AI excluded : {phase2.skipped:,}")
+    print(f"AI deferred : {phase2.deferred:,}")
     print(f"AI failed   : {phase2.failed:,}")
+    print(f"Terra review: {phase2.terra_reviews:,}")
+    print(f"Terra fallback: {phase2.terra_failures:,}")
     print(f"Ledger items: {phase2.interests + phase2.requirements + phase2.issues:,}")
     print(f"Output      : {output}")
     print("DONE")
