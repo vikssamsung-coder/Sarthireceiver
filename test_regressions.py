@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -101,10 +102,12 @@ class ReceiverRegressionTests(unittest.TestCase):
 
     def test_released_intake_claim_clears_claim_timestamp(self):
         job_id = iq.enqueue(self.root / "feed.csv", entry_id="entry-2", db_path=self.db)
+        stale_claim = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
         with sqlite3.connect(self.db) as c:
             c.execute(
-                "UPDATE intake_queue SET status='claimed', "
-                "claimed_at=datetime('now','-2 hours') WHERE id=?", (job_id,))
+                "UPDATE intake_queue SET status='claimed', claimed_at=? WHERE id=?",
+                (stale_claim, job_id),
+            )
 
         self.assertEqual(iq.release_stale(30, db_path=self.db), 1)
         row = iq.list_jobs(db_path=self.db)[0]
