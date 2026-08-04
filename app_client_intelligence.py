@@ -46,9 +46,15 @@ def _launch(job_id: int, db_path) -> None:
         kwargs["creationflags"] = 0x08000000 | 0x00000008 | 0x00000200
     else:
         kwargs["start_new_session"] = True
-    subprocess.Popen(
+    worker = subprocess.Popen(
         [sys.executable, "-u", str(script), "--db", str(db_path),
          "--job-id", str(job_id)], **kwargs,
+    )
+    # Track the detached worker for the whole job.  Child step PIDs are short-lived
+    # and must not be used by orphan recovery during transitions between steps.
+    jobs.update_job(
+        job_id, db_path, pid=worker.pid,
+        message="Background worker launched; waiting for the first step.",
     )
 
 
