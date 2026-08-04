@@ -35,6 +35,11 @@ def main() -> int:
                         finished_at=_now(), message="Cancelled before execution.")
         return 0
 
+    # Keep the stable worker PID in the registry for the entire three-step job.
+    # Recording a child step PID created a race where the UI could clear a valid
+    # job between steps and allow a second pipeline to start.
+    jobs.update_job(args.job_id, args.db, pid=os.getpid())
+
     config = json.loads(job["config_json"])
     state_dir = Path(args.db).resolve().parent
     log_dir = state_dir / "client_intelligence_logs"
@@ -45,6 +50,7 @@ def main() -> int:
         jobs.update_job(
             args.job_id, args.db, status="running", started_at=_now(),
             command_json=json.dumps(commands), log_path=str(log_path),
+            pid=os.getpid(), message="Worker running.",
         )
         with log_path.open("a", encoding="utf-8", errors="replace") as log:
             log.write(f"Started {_now()}\nMode: {job['mode']}\n")
@@ -62,7 +68,10 @@ def main() -> int:
                     creationflags=0x08000000 if os.name == "nt" else 0,
                     start_new_session=os.name != "nt",
                 )
-                jobs.update_job(args.job_id, args.db, pid=process.pid)
+                jobs.update_job(
+                    args.job_id, args.db,
+                    message=f"Running step {step} of {len(commands)} (child PID {process.pid}).",
+                )
                 while process.poll() is None:
                     if _cancelled(args.job_id, args.db):
                         if os.name == "nt":
@@ -93,4 +102,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
