@@ -13,6 +13,7 @@ import streamlit as st
 import client_intelligence_jobs as jobs
 from customer_evaluation_adapter import (
     FIXED_LEADS_FILE, FIXED_ROOT, MODES, capabilities, output_files, paths,
+    run_blockers,
 )
 
 
@@ -61,6 +62,7 @@ def _tail(path: str | None, lines: int = 120) -> str:
 
 def screen(db_path) -> None:
     jobs.init_db(db_path)
+    recovered_jobs = jobs.recover_orphaned_jobs(db_path)
     st.title("Client Intelligence")
     st.caption(
         "Build Client 360, consolidate evaluated calls, deduplicate and version them, "
@@ -101,6 +103,11 @@ def screen(db_path) -> None:
         )
 
     st.subheader("Run")
+    if recovered_jobs:
+        st.warning(
+            f"Cleared {recovered_jobs} unfinished job lock(s) whose worker was no longer running. "
+            "You can start Daily Run again."
+        )
     labels = list(MODES.values())
     by_label = {label: key for key, label in MODES.items()}
     selected = st.selectbox(
@@ -153,20 +160,31 @@ def screen(db_path) -> None:
     history = jobs.list_jobs(db_path, 100)
     active = [row for row in history if row["status"] in {
         "queued", "running", "cancel_requested"}]
-    needs_360 = mode in {"build_360", "full", "profile_new_clients"}
-    disabled = (
-        bool(active) or not caps["pipeline_ready"]
-        or (needs_360 and (not caps["extractor_ready"]
-                          or not caps["leads_ready"]
-                          or not caps["db_password_ready"]))
-        or (mode == "profile_new_clients" and not caps["profiling_ready"])
-    )
+    blockers = run_blockers(mode, caps)
+    disabled = bool(active)
     button_label = "Start daily run" if mode == "full" else "Start operation"
     if st.button(button_label, type="primary", disabled=disabled):
-        job_id = jobs.create_job(mode, config, db_path)
-        _launch(job_id, db_path)
-        st.success(f"Client Intelligence job #{job_id} started.")
-        st.rerun()
+        if blockers:
+            st.error("Cannot start this run:\n\n- " + "\n- ".join(blockers))
+        else:
+            job_id = jobs.create_job(mode, config, db_path)
+            try:
+                _launch(job_id, db_path)
+            except Exception as exc:
+                jobs.update_job(
+                    job_id, db_path, status="failed", return_code=1,
+                    message=f"Worker could not start: {exc}",
+                )
+                st.error(f"Worker could not start: {exc}")
+            else:
+                st.success(f"Client Intelligence job #{job_id} started.")
+                st.rerun()
+
+    if disabled and active:
+        st.caption(
+            f"Start is temporarily unavailable because job #{active[0]['id']} is "
+            f"{active[0]['status']}. Cancel it below or wait for it to finish."
+        )
 
     if active:
         current = active[0]

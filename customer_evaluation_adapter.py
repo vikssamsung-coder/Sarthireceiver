@@ -105,6 +105,30 @@ def capabilities() -> dict[str, object]:
     }
 
 
+def run_blockers(mode: str, caps: dict[str, object] | None = None) -> list[str]:
+    """Return clear preflight errors without making the Run button inert."""
+    if mode not in MODES:
+        return [f"Unsupported operation: {mode}"]
+    current = caps or capabilities()
+    blockers: list[str] = []
+    if not current.get("pipeline_ready"):
+        blockers.append("Client Intelligence pipeline or AI prompt file is missing.")
+    needs_360 = mode in {"build_360", "full", "profile_new_clients"}
+    if needs_360 and not current.get("extractor_ready"):
+        blockers.append("Client 360 extractor is missing.")
+    if needs_360 and not current.get("leads_ready"):
+        blockers.append(f"Leads.csv is missing: {FIXED_LEADS_FILE}")
+    if needs_360 and not current.get("db_password_ready"):
+        blockers.append(
+            "The database password is not available to Client 360. Configure it in "
+            "SARTHI_DB_PASSWORD, common_config.DB_CONFIG, or the extractor's local "
+            "DB_PASSWORD setting."
+        )
+    if mode == "profile_new_clients" and not current.get("profiling_ready"):
+        blockers.append("New Client Profiling report script is missing.")
+    return blockers
+
+
 def _build_360_command(python_exe: str, config: dict) -> list[str]:
     code = pipeline_folder()
     extractor = code / "sarthi_new_clients_360_extract.py"

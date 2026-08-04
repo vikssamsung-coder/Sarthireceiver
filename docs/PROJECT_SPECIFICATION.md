@@ -808,6 +808,9 @@ A release should verify:
 - MIS flows
 - service manager
 - updater exclusions
+- complete `main`-branch Receiver and Call Evaluation code replacement
+- incomplete-archive rejection before installed code is changed
+- obsolete managed-code cleanup without deleting arbitrary local files
 - Client Intelligence page import
 - job creation
 - worker start
