@@ -10,7 +10,7 @@ from phase2_intelligence import (
     CallIntelligence, ExtractionAttempt, ExtractionEnvelope, HybridOpenAIExtractor,
     InterestItem, IssueItem, RequirementItem, ensure_schema,
     canonical_category, reconcile_call_intelligence, refresh_action_controls, run_phase2, table_rows,
-    save_extraction_attempts, upsert_interest, upsert_issue, upsert_requirement,
+    rebuild_ledgers, save_extraction_attempts, upsert_interest, upsert_issue, upsert_requirement,
 )
 from run_pipeline import connect_db, process_row
 
@@ -258,6 +258,23 @@ def main() -> None:
             assert first.processed == 1 and first.issues == 1 and first.requirements == 1 and first.interests == 1
             assert len(table_rows(con, "SELECT * FROM action_register")) == 3
             assert extractor.last_payload["client_360_facts"]["Current Total Margin"] == 25000
+
+            # A successful historical extraction must immediately stop feeding
+            # operational intelligence when the current Sarthi 360 match is lost.
+            con.execute(
+                "UPDATE call_versions SET client_match_status='No Client 360 Match',matched_client_code=''"
+            )
+            con.commit()
+            rebuild_ledgers(con, "RUN-STALE-REMOVAL")
+            for table in ("action_register", "interest_ledger", "requirement_ledger", "issue_ledger"):
+                assert not table_rows(con, f"SELECT * FROM {table}")
+            con.execute(
+                "UPDATE call_versions SET client_match_status='Matched',matched_client_code='CLIENT001' "
+                "WHERE lead_number='1094906'"
+            )
+            con.commit()
+            rebuild_ledgers(con, "RUN-RESTORE-MATCH")
+            assert len(table_rows(con, "SELECT * FROM action_register")) == 3
 
             unmatched = raw_call("2026-07-23 18:30:00", "Unmatched call must not use AI")
             unmatched["Lead Number"] = "9999999"
