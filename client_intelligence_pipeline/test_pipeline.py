@@ -12,6 +12,7 @@ from run_pipeline import (
     connect_db,
     initialize,
     latest_client_360,
+    pipeline_lock,
     process_files,
     query_frame,
     refresh_client_matches,
@@ -22,6 +23,13 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
         paths = initialize(root)
+        with pipeline_lock(paths["state"]):
+            try:
+                with pipeline_lock(paths["state"]):
+                    raise AssertionError("overlapping pipeline lock was allowed")
+            except RuntimeError as exc:
+                assert "already running" in str(exc)
+        assert not (paths["state"] / "sarthi_client_intelligence.pipeline.lock").exists()
         pd.DataFrame([
             {
                 "Client Code": "CLIENT001",
