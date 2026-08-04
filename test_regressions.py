@@ -114,6 +114,7 @@ class ReceiverRegressionTests(unittest.TestCase):
     def test_updater_skips_archive_path_outside_destination(self):
         archive = self.root / "update.zip"
         with zipfile.ZipFile(archive, "w") as z:
+            self._write_required_update_files(z)
             z.writestr("Sarthireceiver-main/good.py", "print('ok')")
             z.writestr("Sarthireceiver-main/../../escaped.py", "bad")
         payload = archive.read_bytes()
@@ -123,9 +124,73 @@ class ReceiverRegressionTests(unittest.TestCase):
             written = updater.update_from_github(
                 destination, log=lambda _m: None)
 
-        self.assertEqual(written, ["good.py"])
+        self.assertIn("good.py", written)
         self.assertTrue((destination / "good.py").is_file())
         self.assertFalse((self.root / "escaped.py").exists())
+
+    @staticmethod
+    def _write_required_update_files(z):
+        for rel in updater.REQUIRED_CODE_FILES:
+            z.writestr(f"Sarthireceiver-main/{rel.as_posix()}", f"content for {rel}")
+
+    def test_updater_replaces_receiver_and_evaluator_and_preserves_data(self):
+        destination = self.root / "install"
+        evaluator = destination / "client_intelligence_pipeline" / "phase2_intelligence.py"
+        evaluator.parent.mkdir(parents=True)
+        evaluator.write_text("old evaluator", encoding="utf-8")
+        (destination / "receiver.sqlite3").write_text("database", encoding="utf-8")
+        (destination / "secrets.toml").write_text("secret", encoding="utf-8")
+
+        archive = self.root / "complete-update.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            self._write_required_update_files(z)
+            z.writestr("Sarthireceiver-main/new_receiver_module.py", "new code")
+            z.writestr("Sarthireceiver-main/receiver.sqlite3", "must not overwrite")
+            z.writestr("Sarthireceiver-main/secrets.toml", "must not overwrite")
+
+        with mock.patch.object(updater, "_fetch_zip", return_value=archive.read_bytes()):
+            written = updater.update_from_github(destination, log=lambda _m: None)
+
+        self.assertIn("app.py", written)
+        self.assertIn("client_intelligence_pipeline/phase2_intelligence.py", written)
+        self.assertEqual(evaluator.read_text(encoding="utf-8"),
+                         "content for client_intelligence_pipeline/phase2_intelligence.py")
+        self.assertEqual((destination / "receiver.sqlite3").read_text(), "database")
+        self.assertEqual((destination / "secrets.toml").read_text(), "secret")
+
+    def test_updater_removes_only_obsolete_previously_managed_code(self):
+        destination = self.root / "install"
+        destination.mkdir()
+        obsolete = destination / "obsolete_module.py"
+        local = destination / "local_notes.txt"
+        obsolete.write_text("old", encoding="utf-8")
+        local.write_text("keep", encoding="utf-8")
+        updater._write_manifest(destination, {Path("obsolete_module.py")})
+
+        archive = self.root / "update-with-deletion.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            self._write_required_update_files(z)
+
+        with mock.patch.object(updater, "_fetch_zip", return_value=archive.read_bytes()):
+            updater.update_from_github(destination, log=lambda _m: None)
+
+        self.assertFalse(obsolete.exists())
+        self.assertTrue(local.exists())
+
+    def test_updater_rejects_incomplete_archive_before_overwrite(self):
+        destination = self.root / "install"
+        destination.mkdir()
+        app_file = destination / "app.py"
+        app_file.write_text("installed app", encoding="utf-8")
+        archive = self.root / "incomplete.zip"
+        with zipfile.ZipFile(archive, "w") as z:
+            z.writestr("wrong-main/app.py", "partial update")
+
+        with mock.patch.object(updater, "_fetch_zip", return_value=archive.read_bytes()):
+            with self.assertRaisesRegex(ValueError, "archive is incomplete"):
+                updater.update_from_github(destination, log=lambda _m: None)
+
+        self.assertEqual(app_file.read_text(encoding="utf-8"), "installed app")
 
 
 if __name__ == "__main__":
