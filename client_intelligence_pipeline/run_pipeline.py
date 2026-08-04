@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
 import sys
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -255,8 +257,12 @@ def initialize(root: Path) -> dict[str, Path]:
 
 
 def connect_db(path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(path)
+    # A full workbook rebuild can hold the writer briefly.  Wait for a valid
+    # writer to finish instead of failing after SQLite's five-second default.
+    con = sqlite3.connect(path, timeout=120)
+    con.execute("PRAGMA busy_timeout=120000")
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA foreign_keys=ON")
     con.executescript(
         """
@@ -343,6 +349,60 @@ def connect_db(path: Path) -> sqlite3.Connection:
     )
     ensure_schema(con)
     return con
+
+
+def _process_exists(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+
+
+@contextmanager
+def pipeline_lock(state_dir: Path):
+    """Prevent overlapping direct or Receiver-launched pipeline processes."""
+    lock_path = state_dir / "sarthi_client_intelligence.pipeline.lock"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"pid": os.getpid(), "started_at": datetime.now().isoformat()})
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                existing = json.loads(lock_path.read_text(encoding="utf-8"))
+                owner_pid = int(existing.get("pid") or 0)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                owner_pid = 0
+            if owner_pid and _process_exists(owner_pid):
+                raise RuntimeError(
+                    "Another Client Intelligence pipeline is already running "
+                    f"(PID {owner_pid}). Wait for it to finish or stop that process before retrying."
+                )
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    f"Stale pipeline lock could not be cleared: {lock_path}. {exc}"
+                ) from exc
+            continue
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            break
+    try:
+        yield lock_path
+    finally:
+        try:
+            current = json.loads(lock_path.read_text(encoding="utf-8"))
+            if int(current.get("pid") or 0) == os.getpid():
+                lock_path.unlink()
+        except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
 
 
 def recording_identity(link: Any) -> str:
@@ -908,25 +968,26 @@ def main() -> int:
         print("Folder structure and taxonomy are ready.")
         return 0
 
-    run_id = f"RUN-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6].upper()}"
-    client360, client360_path = latest_client_360(paths)
-    print(f"Client 360  : {client360_path or 'Not supplied'}")
-    print(f"Client rows : {len(client360):,}")
-    con = connect_db(paths["state"] / "sarthi_client_intelligence.db")
-    try:
-        clients = client_lookup(client360)
-        refreshed_matches = refresh_client_matches(con, clients)
-        counts = process_files(con, paths, clients, run_id)
-        counts["RefreshedMatches"] = refreshed_matches
-        phase2 = Phase2Counts() if args.skip_ai else run_phase2(
-            con, run_id, max_calls=args.max_ai_calls,
-            client_context=client_context_lookup(client360),
-            sarthi_360_only=not args.include_unmatched_calls,
-        )
-        refresh_action_controls(con)
-        output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
-    finally:
-        con.close()
+    with pipeline_lock(paths["state"]):
+        run_id = f"RUN-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6].upper()}"
+        client360, client360_path = latest_client_360(paths)
+        print(f"Client 360  : {client360_path or 'Not supplied'}")
+        print(f"Client rows : {len(client360):,}")
+        con = connect_db(paths["state"] / "sarthi_client_intelligence.db")
+        try:
+            clients = client_lookup(client360)
+            refreshed_matches = refresh_client_matches(con, clients)
+            counts = process_files(con, paths, clients, run_id)
+            counts["RefreshedMatches"] = refreshed_matches
+            phase2 = Phase2Counts() if args.skip_ai else run_phase2(
+                con, run_id, max_calls=args.max_ai_calls,
+                client_context=client_context_lookup(client360),
+                sarthi_360_only=not args.include_unmatched_calls,
+            )
+            refresh_action_controls(con)
+            output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
+        finally:
+            con.close()
     print(f"Inserted    : {counts['Inserted']:,}")
     print(f"Updated     : {counts['Updated']:,}")
     print(f"Duplicates  : {counts['Duplicate']:,}")
