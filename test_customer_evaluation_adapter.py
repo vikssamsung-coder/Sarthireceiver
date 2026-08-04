@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tempfile
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -59,6 +60,16 @@ def main() -> None:
         assert jobs.recover_orphaned_jobs(db_path, grace_seconds=120) == 1
         recovered = jobs.get_job(job_id, db_path)
         assert recovered and recovered["status"] == "failed"
+
+        active_id = jobs.create_job("full", {}, db_path)
+        with jobs._connect(db_path) as con:
+            con.execute(
+                "UPDATE client_intelligence_jobs SET created_at=?,pid=? WHERE id=?",
+                (old, os.getpid(), active_id),
+            )
+        assert jobs.recover_orphaned_jobs(db_path, grace_seconds=120) == 0
+        active = jobs.get_job(active_id, db_path)
+        assert active and active["status"] == "queued"
     try:
         adapter.build_commands("arbitrary_script", {})
     except ValueError:
