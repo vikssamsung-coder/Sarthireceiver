@@ -11,8 +11,11 @@ Skips local data and secrets so an update never clobbers them.
 from __future__ import annotations
 
 import io
+import json
+import os
 import shutil
 import ssl
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -27,6 +30,17 @@ API_ZIP = f"https://api.github.com/repos/{OWNER}/{REPO}/zipball/{BRANCH}"
 SKIP_NAMES = {"secrets.toml"}
 SKIP_EXTS = {".sqlite3", ".sqlite", ".pyc"}
 SKIP_DIRS = {"__pycache__", ".git", ".streamlit"}
+MANIFEST_NAME = ".sarthi_update_manifest.json"
+
+# Refuse a partial or wrong repository archive before touching the installation.
+REQUIRED_CODE_FILES = {
+    Path("app.py"),
+    Path("updater.py"),
+    Path("sarthi_receiver.py"),
+    Path("client_intelligence_pipeline/run_pipeline.py"),
+    Path("client_intelligence_pipeline/phase2_intelligence.py"),
+    Path("client_intelligence_pipeline/prompts/phase2_call_intelligence.md"),
+}
 
 SECRETS_PATH = Path(r"D:\PMD-Desktop-main\.streamlit\secrets.toml")
 
@@ -79,38 +93,111 @@ def _fetch_zip(token: str = "") -> bytes:
         raise
 
 
+def _is_managed_code_path(rel: Path) -> bool:
+    """Return whether an archive path is safe application content to manage."""
+    return (
+        bool(rel.parts)
+        and rel.name not in SKIP_NAMES
+        and rel.name != MANIFEST_NAME
+        and rel.suffix not in SKIP_EXTS
+        and not any(part in SKIP_DIRS for part in rel.parts)
+        and not rel.is_absolute()
+        and ".." not in rel.parts
+    )
+
+
+def _archive_files(zf: zipfile.ZipFile, log=print) -> dict[Path, zipfile.ZipInfo]:
+    """Build the complete safe repository-file map after stripping GitHub's root."""
+    files: dict[Path, zipfile.ZipInfo] = {}
+    for member in zf.infolist():
+        if member.is_dir():
+            continue
+        parts = Path(member.filename).parts
+        if len(parts) < 2:
+            continue
+        rel = Path(*parts[1:])
+        if not _is_managed_code_path(rel):
+            if rel.parts and (rel.is_absolute() or ".." in rel.parts):
+                log(f"skipped unsafe archive path: {member.filename}")
+            continue
+        files[rel] = member
+    missing = sorted(str(path) for path in REQUIRED_CODE_FILES.difference(files))
+    if missing:
+        raise ValueError(
+            "GitHub archive is incomplete or is not the Sarthireceiver repository; "
+            f"missing required code: {', '.join(missing)}"
+        )
+    return files
+
+
+def _read_previous_manifest(dest_root: Path) -> set[Path]:
+    path = dest_root / MANIFEST_NAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            Path(item) for item in payload.get("managed_files", [])
+            if isinstance(item, str) and _is_managed_code_path(Path(item))
+        }
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def _write_manifest(dest_root: Path, managed_files: set[Path]) -> None:
+    payload = {
+        "repository": f"{OWNER}/{REPO}",
+        "branch": BRANCH,
+        "managed_files": sorted(path.as_posix() for path in managed_files),
+    }
+    manifest = dest_root / MANIFEST_NAME
+    temporary = manifest.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temporary, manifest)
+
+
 def update_from_github(dest_dir, token: str = "", log=print) -> list:
-    """Download the repo and overwrite files in dest_dir. Returns files written."""
+    """Replace all GitHub-managed app code while preserving local runtime data."""
     if not token:
         token = load_github_token()
     data = _fetch_zip(token)
-    zf = zipfile.ZipFile(io.BytesIO(data))
-
     dest_root = Path(dest_dir).resolve()
     dest_root.mkdir(parents=True, exist_ok=True)
-    written = []
-    for m in zf.infolist():
-        if m.is_dir():
-            continue
-        parts = Path(m.filename).parts
-        if len(parts) < 2:          # strip GitHub's top folder (Repo-main/)
-            continue
-        rel = Path(*parts[1:])
-        if rel.name in SKIP_NAMES or rel.suffix in SKIP_EXTS:
-            continue
-        if any(p in SKIP_DIRS for p in rel.parts):
-            continue
+    previous = _read_previous_manifest(dest_root)
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        archive_files = _archive_files(zf, log=log)
+        current = set(archive_files)
+
+        # Fully stage and validate the download before modifying installed code.
+        with tempfile.TemporaryDirectory(prefix="sarthi-update-") as stage_name:
+            stage_root = Path(stage_name)
+            for rel, member in archive_files.items():
+                staged = stage_root / rel
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(staged, "wb") as out:
+                    shutil.copyfileobj(src, out)
+
+            written: list[str] = []
+            for rel in sorted(current, key=lambda path: path.as_posix()):
+                target = (dest_root / rel).resolve()
+                target.relative_to(dest_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(stage_root / rel, target)
+                written.append(str(rel))
+                log(f"updated {rel}")
+
+    # Remove only files that a previous updater run explicitly managed. Arbitrary
+    # local files and all protected data/configuration paths remain untouched.
+    for rel in sorted(previous - current, key=lambda path: path.as_posix()):
         target = (dest_root / rel).resolve()
         try:
             target.relative_to(dest_root)
         except ValueError:
-            log(f"skipped unsafe archive path: {m.filename}")
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with zf.open(m) as src, open(target, "wb") as out:
-            shutil.copyfileobj(src, out)
-        written.append(str(rel))
-        log(f"updated {rel}")
+        if target.is_file() and _is_managed_code_path(rel):
+            target.unlink()
+            log(f"removed obsolete {rel}")
+
+    _write_manifest(dest_root, current)
     return written
 
 
