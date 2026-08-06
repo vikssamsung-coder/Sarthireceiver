@@ -27,6 +27,9 @@ def main() -> None:
             {"python_exe": "python", "window": "rolling", "days": 60,
              "tpp_path": r"D:\Sarthi\TPP.xlsx"},
         )
+        call_analysis, _ = adapter.build_commands(
+            "call_analysis_full", {"python_exe": "python", "max_ai_calls": 5000}
+        )
     assert len(setup) == 1
     assert len(process) == 2
     assert "--max-ai-calls" in limited[-1] and "125" in limited[-1]
@@ -39,6 +42,11 @@ def main() -> None:
     profile_flat = [item for command in profile for item in command]
     assert "new_client_profiling_report.py" in " ".join(profile_flat)
     assert "--tpp" in profile_flat and r"D:\Sarthi\TPP.xlsx" in profile_flat
+    assert len(call_analysis) == 2
+    call_flat = [item for command in call_analysis for item in command]
+    assert "call_analysis_clients_360.py" in " ".join(call_flat)
+    assert "--run-intelligence" in call_flat
+    assert "--max-ai-calls" in call_flat and "5000" in call_flat
     ready = {
         "pipeline_ready": True, "extractor_ready": True, "leads_ready": True,
         "db_password_ready": True, "profiling_ready": True,
@@ -47,6 +55,10 @@ def main() -> None:
     no_password = {**ready, "db_password_ready": False}
     assert "database password" in adapter.run_blockers("full", no_password)[0].lower()
     assert adapter.run_blockers("process_calls", no_password) == []
+    call_ready = {
+        **ready, "call_analysis_extractor_ready": True, "call_file_count": 1,
+    }
+    assert adapter.run_blockers("call_analysis_full", call_ready) == []
 
     with tempfile.TemporaryDirectory() as folder:
         db_path = Path(folder) / "jobs.sqlite3"
