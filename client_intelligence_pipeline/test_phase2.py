@@ -239,6 +239,35 @@ def hybrid_checks() -> None:
 def main() -> None:
     guardrail_checks()
     hybrid_checks()
+    with tempfile.TemporaryDirectory() as batch_folder:
+        batch_db = Path(batch_folder) / "automatic_batches.db"
+        batch_source = Path(batch_folder) / "calls.xlsx"
+        batch_source.touch()
+        batch_con = connect_db(batch_db)
+        try:
+            clients = {"1094906": "CLIENT001"}
+            for row_number, timestamp in enumerate((
+                "2026-07-20 09:00:00",
+                "2026-07-20 10:00:00",
+                "2026-07-20 11:00:00",
+            ), start=2):
+                process_row(
+                    batch_con, raw_call(timestamp, f"Pending call {row_number}"),
+                    batch_source, row_number, "RUN-BATCH", clients,
+                )
+            batch_con.commit()
+            drained = run_phase2(
+                batch_con, "RUN-BATCH", FakeExtractor(), max_calls=1,
+            )
+            assert drained.eligible == 3
+            assert drained.processed == 3
+            assert drained.deferred == 0
+            assert len(table_rows(
+                batch_con,
+                "SELECT * FROM intelligence_extractions WHERE status='Success'",
+            )) == 3
+        finally:
+            batch_con.close()
     with tempfile.TemporaryDirectory() as folder:
         db = Path(folder) / "phase2.db"
         source = Path(folder) / "calls.xlsx"

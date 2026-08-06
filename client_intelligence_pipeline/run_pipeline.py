@@ -1024,7 +1024,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="Production root folder.")
     parser.add_argument("--init", action="store_true", help="Create the folder tree and taxonomy template.")
     parser.add_argument("--skip-ai", action="store_true", help="Ingest calls without structured AI interpretation.")
-    parser.add_argument("--max-ai-calls", type=int, help="Limit new/changed calls interpreted in this run.")
+    parser.add_argument(
+        "--max-ai-calls", type=int,
+        help="AI batch size. The run automatically continues until the eligible queue is empty.",
+    )
     parser.add_argument(
         "--include-unmatched-calls", action="store_true",
         help="Also evaluate calls not linked to both a Sarthi 360 lead number and client code.",

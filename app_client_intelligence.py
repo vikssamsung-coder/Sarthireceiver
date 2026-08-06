@@ -126,9 +126,12 @@ def screen(db_path) -> None:
     config = {"python_exe": sys.executable}
     if mode in {"process_calls", "full", "call_analysis_full"}:
         config["max_ai_calls"] = st.number_input(
-            "Maximum new or changed calls to interpret in this run",
+            "AI calls per automatic batch",
             min_value=1, max_value=5000, value=int(saved.get("max_ai_calls", 100)), step=25,
-            help="Exact duplicate calls never use AI and do not count toward this limit.",
+            help=(
+                "Daily Run automatically continues with the next batch until every eligible "
+                "new or changed call is processed. Exact duplicates never use AI."
+            ),
         )
         if mode == "process_calls":
             _save_settings(db_path, {**saved, "max_ai_calls": int(config["max_ai_calls"])})

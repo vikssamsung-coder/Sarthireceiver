@@ -1087,6 +1087,14 @@ def run_phase2(
     client_context: dict[str, dict[str, dict[str, Any]]] | None = None,
     sarthi_360_only: bool = True,
 ) -> Phase2Counts:
+    """Interpret every eligible pending call, committing work in automatic batches.
+
+    ``max_calls`` is retained as a backwards-compatible command/API name, but it
+    now controls batch size rather than truncating the job.  A single Receiver
+    run drains the complete eligible queue.  The detached worker can still
+    cancel the child process between calls, and each successful call is already
+    committed independently for safe restart.
+    """
     ensure_schema(con)
     active_prompt_version = system_prompt_version()
     all_pending = table_rows(
@@ -1110,12 +1118,10 @@ def run_phase2(
     else:
         pending = all_pending
     eligible = len(pending)
-    if max_calls is not None:
-        pending = pending[:max(0, max_calls)]
     counts = Phase2Counts(
         skipped=len(all_pending) - eligible,
         eligible=eligible,
-        deferred=max(0, eligible - len(pending)),
+        deferred=0,
     )
     rebuild_ledgers(con, run_id)
     if extractor is None:
@@ -1126,7 +1132,39 @@ def run_phase2(
             extractor = HybridOpenAIExtractor()
         else:
             extractor = OpenAIExtractor()
-    for call in pending:
+    batch_size = max(1, int(max_calls)) if max_calls is not None else max(1, eligible)
+    for offset in range(0, eligible, batch_size):
+        batch = pending[offset:offset + batch_size]
+        print(
+            f"AI automatic batch {offset // batch_size + 1}/"
+            f"{(eligible + batch_size - 1) // batch_size}: "
+            f"calls {offset + 1}-{offset + len(batch)} of {eligible}",
+            flush=True,
+        )
+        for call in batch:
+            _process_pending_call(
+                con, call, run_id, extractor, active_prompt_version,
+                client_context, counts,
+            )
+    rebuild_ledgers(con, run_id)
+    return counts
+
+
+def _process_pending_call(
+    con: sqlite3.Connection,
+    call: dict[str, Any],
+    run_id: str,
+    extractor: Extractor,
+    active_prompt_version: str,
+    client_context: dict[str, dict[str, dict[str, Any]]] | None,
+    counts: Phase2Counts,
+) -> None:
+    """Interpret and persist one pending call within an automatic batch."""
+
+    # Each call is committed independently so cancellation or a machine restart
+    # resumes from the first genuinely unfinished call on the next Daily Run.
+    # A scheduled call is a populated database row; ignore a defensive empty row.
+    if call:
         extraction_id = ident("EXT")
         created = now_text()
         payload = call_payload(con, call, client_context)
@@ -1224,8 +1262,6 @@ def run_phase2(
             )
             con.commit()
             counts.failed += 1
-    rebuild_ledgers(con, run_id)
-    return counts
 
 
 def refresh_action_controls(con: sqlite3.Connection, as_of: datetime | None = None) -> None:
