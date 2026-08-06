@@ -36,6 +36,8 @@ CLIENT_360_FACT_FIELDS = (
     "Subscription Purchased", "Subscription Purchase Count", "Subscription Amount",
     "Subscription Plans", "First Subscription Date", "Last Subscription Date",
     "Total Revenue",
+    "Funds Received Till Date", "Funds As Of Date", "Total Stock", "Margin Date",
+    "Total Orders", "Executed Order %", "Orders As Of Date", "Call Count",
 )
 
 SYSTEM_COLUMNS = [
