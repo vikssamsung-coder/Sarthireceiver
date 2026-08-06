@@ -16,6 +16,7 @@ MODES = {
     "process_calls": "Process evaluated call files",
     "full": "Daily Run - Refresh 360 and process calls (Recommended)",
     "profile_new_clients": "Build New Client Profiling Report",
+    "call_analysis_full": "Build Call Analysis Client Report and Run Intelligence",
 }
 
 
@@ -94,6 +95,7 @@ def capabilities() -> dict[str, object]:
         "prompt_ready": prompt_file.is_file(),
         "extractor_ready": (code / "sarthi_new_clients_360_extract.py").is_file(),
         "profiling_ready": (code / "new_client_profiling_report.py").is_file(),
+        "call_analysis_extractor_ready": (code / "call_analysis_clients_360.py").is_file(),
         "leads_ready": FIXED_LEADS_FILE.is_file(),
         "db_password_ready": _db_password_ready(),
         "openai_ready": bool(os.getenv("OPENAI_API_KEY")),
@@ -113,12 +115,13 @@ def run_blockers(mode: str, caps: dict[str, object] | None = None) -> list[str]:
     blockers: list[str] = []
     if not current.get("pipeline_ready"):
         blockers.append("Client Intelligence pipeline or AI prompt file is missing.")
-    needs_360 = mode in {"build_360", "full", "profile_new_clients"}
-    if needs_360 and not current.get("extractor_ready"):
+    needs_database = mode in {"build_360", "full", "profile_new_clients", "call_analysis_full"}
+    needs_standard_360 = mode in {"build_360", "full", "profile_new_clients"}
+    if needs_standard_360 and not current.get("extractor_ready"):
         blockers.append("Client 360 extractor is missing.")
-    if needs_360 and not current.get("leads_ready"):
+    if needs_database and not current.get("leads_ready"):
         blockers.append(f"Leads.csv is missing: {FIXED_LEADS_FILE}")
-    if needs_360 and not current.get("db_password_ready"):
+    if needs_database and not current.get("db_password_ready"):
         blockers.append(
             "The database password is not available to Client 360. Configure it in "
             "SARTHI_DB_PASSWORD, common_config.DB_CONFIG, or the extractor's local "
@@ -126,6 +129,11 @@ def run_blockers(mode: str, caps: dict[str, object] | None = None) -> list[str]:
         )
     if mode == "profile_new_clients" and not current.get("profiling_ready"):
         blockers.append("New Client Profiling report script is missing.")
+    if mode == "call_analysis_full":
+        if not current.get("call_analysis_extractor_ready"):
+            blockers.append("Call Analysis Client 360 extractor is missing.")
+        if not current.get("call_file_count"):
+            blockers.append(f"No Call Analysis input files were found in: {paths()['calls']}")
     return blockers
 
 
@@ -183,6 +191,25 @@ def _build_profiling_command(python_exe: str, config: dict) -> list[str]:
     return command
 
 
+def _build_call_analysis_command(python_exe: str, config: dict) -> list[str]:
+    script = pipeline_folder() / "call_analysis_clients_360.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"Call Analysis Client 360 extractor not found: {script}")
+    command = [
+        python_exe, "-u", str(script),
+        "--root", str(FIXED_ROOT),
+        "--call-input", str(paths()["calls"]),
+        "--leads", str(FIXED_LEADS_FILE),
+        "--output", str(paths()["client360"] / "Sarthi_Call_Analysis_Client_360.xlsx"),
+        "--run-intelligence",
+    ]
+    if config.get("skip_ai"):
+        command.append("--skip-ai")
+    elif config.get("max_ai_calls"):
+        command += ["--max-ai-calls", str(max(1, int(config["max_ai_calls"])))]
+    return command
+
+
 def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
     """Return only approved commands; browser input can never select a script path."""
     if mode not in MODES:
@@ -206,6 +233,8 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
         commands = [setup, process]
     elif mode == "full":
         commands = [setup, _build_360_command(python_exe, config), process]
+    elif mode == "call_analysis_full":
+        commands = [setup, _build_call_analysis_command(python_exe, config)]
     else:
         commands = [setup, _build_profiling_command(python_exe, config)]
     return commands, code
@@ -216,6 +245,7 @@ def output_files() -> list[Path]:
     candidates = [
         p["current"] / "Sarthi_Client_Intelligence_Current.xlsx",
         p["client360"] / "Sarthi_New_Client_360.xlsx",
+        p["client360"] / "Sarthi_Call_Analysis_Client_360.xlsx",
         profiling_output(),
     ]
     return [path for path in candidates if path.is_file()]
