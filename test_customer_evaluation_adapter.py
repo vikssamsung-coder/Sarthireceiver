@@ -33,11 +33,12 @@ def main() -> None:
     assert len(setup) == 1
     assert len(process) == 2
     assert "--max-ai-calls" in limited[-1] and "125" in limited[-1]
-    assert len(full) == 3
+    assert len(full) == 2
     flat = [item for command in full for item in command]
     assert str(adapter.FIXED_ROOT) in flat
     assert str(adapter.FIXED_LEADS_FILE) in flat
-    assert "--days" in flat and "45" in flat
+    assert "call_analysis_clients_360.py" in " ".join(flat)
+    assert "--run-intelligence" in flat
     assert len(profile) == 2
     profile_flat = [item for command in profile for item in command]
     assert "new_client_profiling_report.py" in " ".join(profile_flat)
@@ -50,6 +51,7 @@ def main() -> None:
     ready = {
         "pipeline_ready": True, "extractor_ready": True, "leads_ready": True,
         "db_password_ready": True, "profiling_ready": True,
+        "call_analysis_extractor_ready": True, "call_file_count": 1,
     }
     assert adapter.run_blockers("full", ready) == []
     no_password = {**ready, "db_password_ready": False}

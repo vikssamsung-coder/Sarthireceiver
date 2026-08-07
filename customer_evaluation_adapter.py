@@ -14,7 +14,7 @@ MODES = {
     "setup": "Set up Customer Evaluation folders",
     "build_360": "Refresh Sarthi Client 360",
     "process_calls": "Process evaluated call files",
-    "full": "Daily Run - Refresh 360 and process calls (Recommended)",
+    "full": "Daily Run - Build call-driven 360 and all reports (Recommended)",
     "profile_new_clients": "Build New Client Profiling Report",
     "call_analysis_full": "Build Call Analysis Client Report and Run Intelligence",
 }
@@ -104,6 +104,8 @@ def capabilities() -> dict[str, object]:
         "call_file_count": sum(1 for pattern in ("*.xlsx", "*.xlsm", "*.csv")
                                for _ in p["calls"].glob(pattern)) if p["calls"].is_dir() else 0,
         "current_workbook": p["current"] / "Sarthi_Client_Intelligence_Current.xlsx",
+        "rm_action_workbook": p["current"] / "RM_Action_Sheet_Current.xlsx",
+        "management_workbook": p["current"] / "Management_Dashboard_Current.xlsx",
     }
 
 
@@ -116,7 +118,7 @@ def run_blockers(mode: str, caps: dict[str, object] | None = None) -> list[str]:
     if not current.get("pipeline_ready"):
         blockers.append("Client Intelligence pipeline or AI prompt file is missing.")
     needs_database = mode in {"build_360", "full", "profile_new_clients", "call_analysis_full"}
-    needs_standard_360 = mode in {"build_360", "full", "profile_new_clients"}
+    needs_standard_360 = mode in {"build_360", "profile_new_clients"}
     if needs_standard_360 and not current.get("extractor_ready"):
         blockers.append("Client 360 extractor is missing.")
     if needs_database and not current.get("leads_ready"):
@@ -129,7 +131,7 @@ def run_blockers(mode: str, caps: dict[str, object] | None = None) -> list[str]:
         )
     if mode == "profile_new_clients" and not current.get("profiling_ready"):
         blockers.append("New Client Profiling report script is missing.")
-    if mode == "call_analysis_full":
+    if mode in {"full", "call_analysis_full"}:
         if not current.get("call_analysis_extractor_ready"):
             blockers.append("Call Analysis Client 360 extractor is missing.")
         if not current.get("call_file_count"):
@@ -232,7 +234,7 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
     elif mode == "process_calls":
         commands = [setup, process]
     elif mode == "full":
-        commands = [setup, _build_360_command(python_exe, config), process]
+        commands = [setup, _build_call_analysis_command(python_exe, config)]
     elif mode == "call_analysis_full":
         commands = [setup, _build_call_analysis_command(python_exe, config)]
     else:
@@ -243,6 +245,8 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
 def output_files() -> list[Path]:
     p = paths()
     candidates = [
+        p["current"] / "RM_Action_Sheet_Current.xlsx",
+        p["current"] / "Management_Dashboard_Current.xlsx",
         p["current"] / "Sarthi_Client_Intelligence_Current.xlsx",
         p["client360"] / "Sarthi_New_Client_360.xlsx",
         p["client360"] / "Sarthi_Call_Analysis_Client_360.xlsx",
