@@ -135,7 +135,7 @@ def screen(db_path) -> None:
         )
         if mode == "process_calls":
             _save_settings(db_path, {**saved, "max_ai_calls": int(config["max_ai_calls"])})
-    if mode in {"build_360", "full", "profile_new_clients"}:
+    if mode in {"build_360", "profile_new_clients"}:
         default_window = saved.get("window", "calendar")
         window = st.radio(
             "Account-opening window", ["calendar", "rolling"], horizontal=True,
@@ -204,13 +204,51 @@ def screen(db_path) -> None:
         if current.get("log_path"):
             st.code(_tail(current["log_path"], 80) or "(waiting for output)")
 
-    st.subheader("Outputs")
+    st.subheader("Complete reports")
     available = output_files()
     if not available:
         st.caption("No Client Intelligence outputs have been generated yet.")
+    manifest = {}
+    manifest_path = p["current"] / "Client_Intelligence_Output_Manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    if manifest:
+        status = manifest.get("status", "Unknown")
+        message = (
+            f"Run `{manifest.get('processing_run_id', '')}` · generated "
+            f"{manifest.get('generated_at', '')} · status: **{status}**"
+        )
+        if status == "Complete":
+            st.success(message)
+        else:
+            st.warning(
+                message + f" · deferred calls: {manifest.get('eligible_calls_deferred', 0)}"
+                f" · AI failures: {manifest.get('ai_failures', 0)}"
+                f" · ingestion errors: {manifest.get('ingestion_errors', 0)}"
+            )
+        if history and history[0].get("status") in {"failed", "cancelled"}:
+            try:
+                stale = pd.Timestamp(history[0]["created_at"]) > pd.Timestamp(manifest["generated_at"])
+            except Exception:
+                stale = True
+            if stale:
+                st.error(
+                    f"These reports are from an older successful run. The latest job "
+                    f"#{history[0]['id']} {history[0]['status']} and did not replace them."
+                )
+    report_meta = {
+        str(item.get("file")): item
+        for item in manifest.get("reports", {}).values() if isinstance(item, dict)
+    }
     for path in available:
         a, b = st.columns([4, 1])
-        a.write(f"**{path.name}**  \n`{path}`")
+        metadata = report_meta.get(path.name, {})
+        detail = f" · {metadata.get('rows')} primary rows" if "rows" in metadata else ""
+        generated = manifest.get("generated_at", "") if metadata else ""
+        freshness = f" · generated {generated}" if generated else ""
+        a.write(f"**{path.name}**{detail}{freshness}  \n`{path}`")
         with path.open("rb") as handle:
             b.download_button("Download", handle.read(), file_name=path.name,
                               key=f"ci_download_{path}")

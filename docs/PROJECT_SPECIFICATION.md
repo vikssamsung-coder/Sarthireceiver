@@ -901,9 +901,28 @@ The optimization target is one initial AI call per eligible call summary and zer
 - per-attempt audit for Luna and Terra response IDs, outputs, tokens, timing, failures, and estimated cost
 - run-level AI limit and ingestion-only operation when no key is available
 
-### Current workbook
+### Current reports
 
-`Sarthi_Client_Intelligence_Current.xlsx` contains Management Summary, Action Worklist, Client Call Timeline, Common Call Master, Processing Log, all three ledgers, Ledger History, Closed Actions, Client 360, duplicate/unmatched/error reviews, Taxonomy Master, AI Extraction Audit, AI Model Attempts, and Call Versions Audit.
+Every complete run generates three independently downloadable current workbooks
+and timestamped archive copies:
+
+1. `RM_Action_Sheet_Current.xlsx` — exactly one primary row per Client Code,
+   consolidating issues, requirements, interests, evidence, recording links,
+   owner/team, priority, recurrence, SLA, due date and next action. A supporting
+   sheet preserves the underlying open action records without exposing internal
+   IDs in the primary RM view.
+2. `Management_Dashboard_Current.xlsx` — executive KPIs, ranked issues, severity,
+   recurring clients, friction hotspots, SLA status, team workload, requirement
+   demand, interest demand and the consolidated RM action summary.
+3. `Sarthi_Client_Intelligence_Current.xlsx` — the complete operational and audit
+   ledger: report metadata, processing summary, RM view, Action Worklist, Client
+   Call Timeline, Common Call Master, all three ledgers, Ledger History, Closed
+   Actions, Client 360, duplicate/unmatched/error review, taxonomy, AI extraction
+   audit, model attempts and all call versions.
+
+`Client_Intelligence_Output_Manifest.json` records the generating Run ID,
+timestamp, source, primary row counts, archives, deferred calls, AI failures and
+ingestion errors so the frontend can identify stale or exception outputs.
 
 ## 18. Recommended next phases
 
@@ -921,9 +940,9 @@ The optimization target is one initial AI call per eligible call summary and zer
 - role-based access and initiating-user audit
 - team-wise worklist exports and dashboards
 
-### Phase 5 — management analytics
+### Phase 5 — advanced management analytics
 
-- issue recurrence and SLA trends
+- time-series issue recurrence and SLA trends (current snapshot rankings are implemented)
 - interest conversion and requirement fulfilment
 - action effectiveness against activation, trading, retention, and revenue
 - taxonomy review and false-positive workflow

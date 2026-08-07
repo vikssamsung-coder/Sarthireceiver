@@ -102,6 +102,22 @@ ACTION_COLUMNS = [
     "Days Open", "SLA Status", "Escalation Level", "Latest Call Summary",
 ]
 
+RM_ACTION_COLUMNS = [
+    "Priority", "Client Code", "Lead Number", "Client Name", "Owner/RM",
+    "Assigned Team", "Open Action Count", "Open Issue Count", "Open Requirement Count",
+    "Open Interest Count", "Issue Identified", "Requirement Identified",
+    "Interest/Opportunity", "Category", "Subcategory", "Product/Platform",
+    "Severity", "Repeat Count", "Client Evidence", "Call Recording Link",
+    "Recommended Next Action", "Due Date", "Next Follow-up Date", "Days Open",
+    "SLA Status", "Latest Call Summary", "Latest Mention Date",
+]
+
+REPORT_FILENAMES = {
+    "rm": "RM_Action_Sheet_Current.xlsx",
+    "management": "Management_Dashboard_Current.xlsx",
+    "intelligence": "Sarthi_Client_Intelligence_Current.xlsx",
+}
+
 INTEREST_COLUMNS = [
     "Interest ID", "Client Code", "Lead Number", "First Call ID", "Latest Call ID",
     "Interest Category", "Product/Instrument", "Interest Description", "Evidence Type",
@@ -808,6 +824,278 @@ def action_frame(con: sqlite3.Connection) -> tuple[pd.DataFrame, pd.DataFrame]:
     return active_output, closed
 
 
+def _distinct(values: Iterable[Any], limit: int = 8) -> str:
+    seen: list[str] = []
+    for value in values:
+        item = clean_text(value)
+        if item and item not in seen:
+            seen.append(item)
+    result = "; ".join(seen[:limit])
+    if len(seen) > limit:
+        result += f"; +{len(seen) - limit} more"
+    return result
+
+
+def _open_mask(frame: pd.DataFrame, closed_column: str = "Closed Date") -> pd.Series:
+    if frame.empty:
+        return pd.Series(index=frame.index, dtype=bool)
+    if closed_column in frame:
+        return frame[closed_column].fillna("").astype(str).str.strip().eq("")
+    if "Current Status" in frame:
+        return ~frame["Current Status"].fillna("").astype(str).str.lower().isin(
+            {"closed", "resolved", "completed", "cancelled"}
+        )
+    return pd.Series(True, index=frame.index, dtype=bool)
+
+
+def build_rm_action_sheet(actions: pd.DataFrame, timeline: pd.DataFrame) -> pd.DataFrame:
+    """Create the agreed operational view: exactly one actionable row per client."""
+    if actions.empty or "Client Code" not in actions:
+        return empty_frame(RM_ACTION_COLUMNS)
+    active = actions[actions["Client Code"].fillna("").astype(str).str.strip().ne("")].copy()
+    if active.empty:
+        return empty_frame(RM_ACTION_COLUMNS)
+
+    recording_by_call: dict[str, str] = {}
+    if not timeline.empty and {"Call_Unique_ID", "Conversation Recording Link"}.issubset(timeline.columns):
+        recording_by_call = {
+            clean_text(row["Call_Unique_ID"]): clean_text(row["Conversation Recording Link"])
+            for _, row in timeline.iterrows() if clean_text(row["Call_Unique_ID"])
+        }
+
+    priority_rank = {"Critical": 1, "High": 2, "Medium": 3, "Low": 4}
+    active["_priority_rank"] = active["Priority"].map(priority_rank).fillna(9)
+    active["_latest_sort"] = pd.to_datetime(active["Latest Mention Date"], errors="coerce")
+    rows: list[dict[str, Any]] = []
+    for client_code, group in active.groupby("Client Code", sort=False, dropna=False):
+        group = group.sort_values(["_priority_rank", "_latest_sort"], ascending=[True, False], na_position="last")
+        primary = group.iloc[0]
+        source = group.get("Source Type", pd.Series("", index=group.index)).fillna("").astype(str).str.lower()
+        issues = group[source.eq("issue")]
+        requirements = group[source.eq("requirement")]
+        interests = group[source.eq("interest")]
+        call_links = [recording_by_call.get(clean_text(value), "") for value in group.get("Source Call ID", [])]
+        rows.append({
+            "Priority": clean_text(primary.get("Priority")) or "Medium",
+            "Client Code": clean_text(client_code),
+            "Lead Number": _distinct(group.get("Lead Number", []), 3),
+            "Client Name": _distinct(group.get("Client Name", []), 2),
+            "Owner/RM": _distinct(group.get("Assigned Employee", []), 3),
+            "Assigned Team": _distinct(group.get("Assigned Team", []), 4),
+            "Open Action Count": len(group),
+            "Open Issue Count": len(issues),
+            "Open Requirement Count": len(requirements),
+            "Open Interest Count": len(interests),
+            "Issue Identified": _distinct(issues.get("Item Summary", [])),
+            "Requirement Identified": _distinct(requirements.get("Item Summary", [])),
+            "Interest/Opportunity": _distinct(interests.get("Item Summary", [])),
+            "Category": _distinct(group.get("Category", [])),
+            "Subcategory": _distinct(group.get("Subcategory", [])),
+            "Product/Platform": _distinct(group.get("Product/Platform", [])),
+            "Severity": _distinct(group.get("Priority", []), 4),
+            "Repeat Count": int(pd.to_numeric(group.get("Repeat Count", 0), errors="coerce").fillna(0).sum()),
+            "Client Evidence": _distinct(group.get("Client Statement", []), 5),
+            "Call Recording Link": _distinct(call_links, 5),
+            "Recommended Next Action": _distinct(group.get("Recommended Action", []), 5),
+            "Due Date": _distinct(group.get("Due Date", []), 3),
+            "Next Follow-up Date": _distinct(group.get("Next Follow-up Date", []), 3),
+            "Days Open": int(pd.to_numeric(group.get("Days Open", 0), errors="coerce").fillna(0).max()),
+            "SLA Status": "Overdue" if group.get("SLA Status", pd.Series(dtype=str)).eq("Overdue").any() else "Within SLA",
+            "Latest Call Summary": _distinct(group.get("Latest Call Summary", []), 3),
+            "Latest Mention Date": clean_text(primary.get("Latest Mention Date")),
+        })
+    output = pd.DataFrame(rows, columns=RM_ACTION_COLUMNS)
+    output["_rank"] = output["Priority"].map(priority_rank).fillna(9)
+    return output.sort_values(["_rank", "SLA Status", "Days Open"], ascending=[True, True, False]).drop(columns="_rank")
+
+
+def build_management_frames(
+    actions: pd.DataFrame, issues: pd.DataFrame, requirements: pd.DataFrame,
+    interests: pd.DataFrame, rm_sheet: pd.DataFrame, run_id: str,
+) -> dict[str, pd.DataFrame]:
+    """Build management-ready rankings, recurrence, SLA, ownership and demand views."""
+    today = pd.Timestamp.now().normalize()
+    issue_work = issues.copy()
+    if not issue_work.empty:
+        issue_work["_open"] = _open_mask(issue_work)
+        issue_work["_first"] = pd.to_datetime(issue_work.get("First Raised Date"), errors="coerce")
+        issue_work["_sla"] = pd.to_datetime(issue_work.get("SLA Date"), errors="coerce")
+        issue_work["_days_open"] = (today - issue_work["_first"].dt.normalize()).dt.days.clip(lower=0)
+        issue_work["_overdue"] = issue_work["_open"] & issue_work["_sla"].notna() & issue_work["_sla"].lt(today)
+        for col in ["Primary Category", "Subcategory", "Product/Platform", "Standard Issue Title", "Severity", "Assigned Team"]:
+            issue_work[col] = issue_work.get(col, pd.Series(index=issue_work.index, dtype=str)).fillna("").replace("", "Unspecified")
+        issue_work["Repeat Count"] = pd.to_numeric(issue_work.get("Repeat Count", 0), errors="coerce").fillna(0).astype(int)
+
+        ranking = issue_work.groupby(
+            ["Primary Category", "Subcategory", "Standard Issue Title"], dropna=False
+        ).agg(
+            Affected_Clients=("Client Code", "nunique"),
+            Issue_Records=("Issue ID", "count"),
+            Total_Repeats=("Repeat Count", "sum"),
+            Open_Issues=("_open", "sum"),
+            Overdue_Issues=("_overdue", "sum"),
+            Average_Days_Open=("_days_open", "mean"),
+            Maximum_Days_Open=("_days_open", "max"),
+        ).reset_index()
+        critical = issue_work[issue_work["Severity"].eq("Critical")].groupby(
+            ["Primary Category", "Subcategory", "Standard Issue Title"]
+        ).size().rename("Critical_Issues")
+        high = issue_work[issue_work["Severity"].eq("High")].groupby(
+            ["Primary Category", "Subcategory", "Standard Issue Title"]
+        ).size().rename("High_Issues")
+        ranking = ranking.merge(critical, how="left", on=["Primary Category", "Subcategory", "Standard Issue Title"])
+        ranking = ranking.merge(high, how="left", on=["Primary Category", "Subcategory", "Standard Issue Title"])
+        ranking[["Critical_Issues", "High_Issues"]] = ranking[["Critical_Issues", "High_Issues"]].fillna(0).astype(int)
+        ranking["Recurrence Score"] = ranking["Affected_Clients"] + ranking["Total_Repeats"]
+        ranking["Priority Score"] = (
+            ranking["Critical_Issues"] * 5 + ranking["High_Issues"] * 3
+            + ranking["Open_Issues"] * 2 + ranking["Overdue_Issues"] * 3
+            + ranking["Total_Repeats"]
+        )
+        ranking = ranking.rename(columns={c: c.replace("_", " ") for c in ranking.columns}).sort_values(
+            ["Priority Score", "Affected Clients"], ascending=False
+        )
+
+        severity = issue_work.groupby("Severity", dropna=False).agg(
+            Issues=("Issue ID", "count"), Affected_Clients=("Client Code", "nunique"),
+            Open=("_open", "sum"), Overdue=("_overdue", "sum"), Repeats=("Repeat Count", "sum"),
+        ).reset_index().rename(columns={"Affected_Clients": "Affected Clients"})
+
+        hotspots = issue_work.groupby(
+            ["Primary Category", "Subcategory", "Product/Platform"], dropna=False
+        ).agg(
+            Affected_Clients=("Client Code", "nunique"), Issues=("Issue ID", "count"),
+            Open=("_open", "sum"), Overdue=("_overdue", "sum"), Repeats=("Repeat Count", "sum"),
+        ).reset_index().rename(columns={"Affected_Clients": "Affected Clients"}).sort_values(
+            ["Affected Clients", "Repeats"], ascending=False
+        )
+
+        recurring = issue_work.groupby("Client Code", dropna=False).agg(
+            Lead_Number=("Lead Number", lambda s: _distinct(s, 3)),
+            Issue_Records=("Issue ID", "count"), Total_Repeats=("Repeat Count", "sum"),
+            Open_Issues=("_open", "sum"), Overdue_Issues=("_overdue", "sum"),
+            Categories=("Primary Category", lambda s: _distinct(s, 6)),
+            Latest_Mention=("Latest Mention Date", "max"),
+        ).reset_index().rename(columns={c: c.replace("_", " ") for c in ["Lead_Number", "Issue_Records", "Total_Repeats", "Open_Issues", "Overdue_Issues", "Latest_Mention"]})
+        recurring["Recurrence Rank Score"] = recurring["Issue Records"] + recurring["Total Repeats"] + recurring["Overdue Issues"] * 2
+        recurring = recurring.sort_values("Recurrence Rank Score", ascending=False)
+    else:
+        ranking = pd.DataFrame(columns=["Primary Category", "Subcategory", "Standard Issue Title", "Affected Clients", "Issue Records", "Total Repeats", "Open Issues", "Overdue Issues", "Critical Issues", "High Issues", "Recurrence Score", "Priority Score"])
+        severity = pd.DataFrame(columns=["Severity", "Issues", "Affected Clients", "Open", "Overdue", "Repeats"])
+        hotspots = pd.DataFrame(columns=["Primary Category", "Subcategory", "Product/Platform", "Affected Clients", "Issues", "Open", "Overdue", "Repeats"])
+        recurring = pd.DataFrame(columns=["Client Code", "Lead Number", "Issue Records", "Total Repeats", "Open Issues", "Overdue Issues", "Categories", "Latest Mention", "Recurrence Rank Score"])
+
+    def demand(frame: pd.DataFrame, category: str, description: str, count_name: str) -> pd.DataFrame:
+        if frame.empty:
+            return pd.DataFrame(columns=[category, "Affected Clients", count_name, "Top Details"])
+        work = frame[_open_mask(frame)].copy()
+        if work.empty:
+            return pd.DataFrame(columns=[category, "Affected Clients", count_name, "Top Details"])
+        work[category] = work.get(category, pd.Series(index=work.index, dtype=str)).fillna("").replace("", "Unspecified")
+        return work.groupby(category, dropna=False).agg(
+            Affected_Clients=("Client Code", "nunique"),
+            Records=("Client Code", "size"),
+            Top_Details=(description, lambda s: _distinct(s, 8)),
+        ).reset_index().rename(columns={"Affected_Clients": "Affected Clients", "Records": count_name, "Top_Details": "Top Details"}).sort_values("Affected Clients", ascending=False)
+
+    requirement_demand = demand(requirements, "Requirement Category", "Requirement Description", "Open Requirements")
+    interest_demand = demand(interests, "Interest Category", "Interest Description", "Open Interests")
+
+    if actions.empty:
+        sla = pd.DataFrame(columns=["SLA Status", "Actions", "Affected Clients"])
+        teams = pd.DataFrame(columns=["Assigned Team", "Actions", "Affected Clients", "Critical", "High", "Overdue"])
+    else:
+        sla = actions.groupby("SLA Status", dropna=False).agg(
+            Actions=("Client Code", "size"), Affected_Clients=("Client Code", "nunique")
+        ).reset_index().rename(columns={"Affected_Clients": "Affected Clients"})
+        work = actions.copy()
+        work["Assigned Team"] = work["Assigned Team"].fillna("").replace("", "Unassigned")
+        work["_critical"] = work["Priority"].eq("Critical")
+        work["_high"] = work["Priority"].eq("High")
+        work["_overdue"] = work["SLA Status"].eq("Overdue")
+        teams = work.groupby("Assigned Team", dropna=False).agg(
+            Actions=("Client Code", "size"), Affected_Clients=("Client Code", "nunique"),
+            Critical=("_critical", "sum"), High=("_high", "sum"), Overdue=("_overdue", "sum"),
+        ).reset_index().rename(columns={"Affected_Clients": "Affected Clients"}).sort_values(["Critical", "Overdue", "Actions"], ascending=False)
+
+    executive = pd.DataFrame([
+        ("Processing Run ID", run_id),
+        ("Generated At", datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("Clients Requiring Action", len(rm_sheet)),
+        ("Open Actions", len(actions)),
+        ("Critical Actions", int(actions.get("Priority", pd.Series(dtype=str)).eq("Critical").sum())),
+        ("High Actions", int(actions.get("Priority", pd.Series(dtype=str)).eq("High").sum())),
+        ("Overdue Actions", int(actions.get("SLA Status", pd.Series(dtype=str)).eq("Overdue").sum())),
+        ("Open Issues", int(_open_mask(issues).sum())),
+        ("Affected Clients with Issues", int(issues.loc[_open_mask(issues), "Client Code"].nunique()) if not issues.empty else 0),
+        ("Open Requirements", int(_open_mask(requirements).sum())),
+        ("Open Interests/Opportunities", int(_open_mask(interests).sum())),
+        ("Repeated Issue Mentions", int(pd.to_numeric(issues.get("Repeat Count", 0), errors="coerce").fillna(0).sum()) if not issues.empty else 0),
+    ], columns=["KPI", "Value"])
+    return {
+        "Executive Dashboard": executive, "Issue Ranking": ranking,
+        "Severity Summary": severity, "Recurring Clients": recurring,
+        "Friction Hotspots": hotspots, "SLA Overview": sla,
+        "Team Workload": teams, "Requirement Demand": requirement_demand,
+        "Interest Demand": interest_demand,
+    }
+
+
+def report_metadata(
+    report_name: str, run_id: str, client360_path: Path | None,
+    row_count: int, counts: dict[str, int], phase2: Phase2Counts,
+) -> pd.DataFrame:
+    pending = int(phase2.deferred)
+    failures = int(phase2.failed) + int(counts.get("Error", 0))
+    status = "Complete" if not pending and not failures else "Complete with exceptions"
+    return pd.DataFrame([
+        ("Report", report_name), ("Processing Run ID", run_id),
+        ("Generated At", datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("Data Source", client360_path.name if client360_path else "Not supplied"),
+        ("Primary Row Count", row_count), ("Report Status", status),
+        ("Eligible Calls Deferred", pending), ("AI Failures", phase2.failed),
+        ("Ingestion Errors", counts.get("Error", 0)),
+    ], columns=["Field", "Value"])
+
+
+def write_excel_report(path: Path, sheets: dict[str, pd.DataFrame], add_dashboard_charts: bool = False) -> None:
+    with pd.ExcelWriter(path, engine="xlsxwriter", datetime_format="dd-mmm-yyyy hh:mm:ss") as writer:
+        header = writer.book.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
+        overdue = writer.book.add_format({"bg_color": "#FCE4D6", "font_color": "#9C0006"})
+        for name, frame in sheets.items():
+            safe_name = name[:31]
+            frame.to_excel(writer, sheet_name=safe_name, index=False)
+            ws = writer.sheets[safe_name]
+            ws.freeze_panes(1, 0)
+            if len(frame.columns):
+                ws.autofilter(0, 0, len(frame), len(frame.columns) - 1)
+            ws.set_row(0, 32)
+            for idx, col in enumerate(frame.columns):
+                ws.write(0, idx, col, header)
+                maximum = int(frame[col].fillna("").astype(str).str.len().max()) if len(frame) else len(str(col))
+                ws.set_column(idx, idx, min(max(maximum + 2, len(str(col)) + 2, 11), 42))
+            if "SLA Status" in frame.columns and len(frame):
+                idx = frame.columns.get_loc("SLA Status")
+                ws.conditional_format(1, idx, len(frame), idx, {"type": "text", "criteria": "containing", "value": "Overdue", "format": overdue})
+
+        if add_dashboard_charts and "Executive Dashboard" in sheets:
+            dashboard = writer.sheets["Executive Dashboard"]
+            ranking = sheets.get("Issue Ranking", pd.DataFrame()).head(10)
+            if not ranking.empty and "Affected Clients" in ranking:
+                chart = writer.book.add_chart({"type": "bar"})
+                title_col = ranking.columns.get_loc("Standard Issue Title")
+                value_col = ranking.columns.get_loc("Affected Clients")
+                chart.add_series({
+                    "name": "Affected Clients",
+                    "categories": ["Issue Ranking", 1, title_col, len(ranking), title_col],
+                    "values": ["Issue Ranking", 1, value_col, len(ranking), value_col],
+                    "fill": {"color": "#00A6A6"},
+                })
+                chart.set_title({"name": "Top Issues by Affected Clients"})
+                chart.set_legend({"none": True})
+                dashboard.insert_chart("D2", chart, {"x_scale": 1.25, "y_scale": 1.25})
+
+
 def write_workbook(
     paths: dict[str, Path], con: sqlite3.Connection, client360: pd.DataFrame,
     client360_path: Path | None, counts: dict[str, int], phase2: Phase2Counts, run_id: str,
@@ -979,43 +1267,82 @@ def write_workbook(
         ("Phase", "Phase 2 — structured interpretation, ledgers and unified worklist"),
     ], columns=["Metric", "Value"])
 
-    output = paths["current"] / "Sarthi_Client_Intelligence_Current.xlsx"
-    with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="dd-mmm-yyyy hh:mm:ss") as writer:
-        sheets = {
-            "Management_Summary": summary,
-            "Action_Worklist": actions,
-            "Client_Call_Timeline": timeline,
-            "Common_Call_Master": latest,
-            "Call_Processing_Log": logs,
-            "Interest_Ledger": interests,
-            "Requirement_Ledger": requirements,
-            "Issue_Ledger": issues,
-            "Ledger_History": history,
-            "Closed_Actions": closed_actions,
-            "Client_360": safe_client360,
-            "Duplicate_Review": dupes,
-            "Unmatched_Calls": unmatched,
-            "Processing_Errors": errors,
-            "Taxonomy_Master": load_taxonomy(paths),
-            "AI_Extraction_Audit": extractions,
-            "AI_Model_Attempts": extraction_attempts,
-            "Call_Versions_Audit": all_versions,
-        }
-        header = writer.book.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D", "border": 1, "align": "center", "valign": "vcenter", "text_wrap": True})
-        for name, frame in sheets.items():
-            frame.to_excel(writer, sheet_name=name[:31], index=False)
-            ws = writer.sheets[name[:31]]
-            ws.freeze_panes(1, 0)
-            if len(frame.columns):
-                ws.autofilter(0, 0, len(frame), len(frame.columns) - 1)
-            ws.set_row(0, 32)
-            for idx, col in enumerate(frame.columns):
-                ws.write(0, idx, col, header)
-                length = max(len(str(col)), min(50, int(frame[col].fillna("").astype(str).str.len().max()) if len(frame) else len(str(col))))
-                ws.set_column(idx, idx, min(max(length + 2, 11), 42))
+    rm_sheet = build_rm_action_sheet(actions, timeline)
+    management = build_management_frames(actions, issues, requirements, interests, rm_sheet, run_id)
 
-    archive = paths["archive"] / f"Sarthi_Client_Intelligence_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-    shutil.copy2(output, archive)
+    output = paths["current"] / REPORT_FILENAMES["intelligence"]
+    rm_output = paths["current"] / REPORT_FILENAMES["rm"]
+    management_output = paths["current"] / REPORT_FILENAMES["management"]
+
+    intelligence_sheets = {
+        "Report Metadata": report_metadata(
+            "Sarthi Client Intelligence", run_id, client360_path, len(latest), counts, phase2
+        ),
+        "Processing Summary": summary,
+        "RM Action View": rm_sheet,
+        "Action Worklist": actions,
+        "Client Call Timeline": timeline,
+        "Common Call Master": latest,
+        "Call Processing Log": logs,
+        "Interest Ledger": interests,
+        "Requirement Ledger": requirements,
+        "Issue Ledger": issues,
+        "Ledger History": history,
+        "Closed Actions": closed_actions,
+        "Client 360": safe_client360,
+        "Duplicate Review": dupes,
+        "Unmatched Calls": unmatched,
+        "Processing Errors": errors,
+        "Taxonomy Master": load_taxonomy(paths),
+        "AI Extraction Audit": extractions,
+        "AI Model Attempts": extraction_attempts,
+        "Call Versions Audit": all_versions,
+    }
+    rm_sheets = {
+        "Report Metadata": report_metadata(
+            "RM Action Sheet", run_id, client360_path, len(rm_sheet), counts, phase2
+        ),
+        "RM Action Sheet": rm_sheet,
+        "Supporting Open Actions": actions,
+    }
+    management_sheets = {
+        "Report Metadata": report_metadata(
+            "Management Dashboard", run_id, client360_path, len(rm_sheet), counts, phase2
+        ),
+        **management,
+        "RM Action Summary": rm_sheet,
+    }
+    write_excel_report(output, intelligence_sheets)
+    write_excel_report(rm_output, rm_sheets)
+    write_excel_report(management_output, management_sheets, add_dashboard_charts=True)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archived: dict[str, str] = {}
+    for key, current_path in {
+        "intelligence": output, "rm": rm_output, "management": management_output,
+    }.items():
+        archive_name = current_path.name.replace("_Current.xlsx", f"_{stamp}.xlsx")
+        archive_path = paths["archive"] / archive_name
+        shutil.copy2(current_path, archive_path)
+        archived[key] = archive_path.name
+
+    manifest = {
+        "processing_run_id": run_id,
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "client_360_source": client360_path.name if client360_path else None,
+        "status": "Complete" if not phase2.deferred and not phase2.failed and not counts.get("Error", 0) else "Complete with exceptions",
+        "reports": {
+            "rm": {"file": rm_output.name, "rows": len(rm_sheet), "archive": archived["rm"]},
+            "management": {"file": management_output.name, "rows": len(rm_sheet), "archive": archived["management"]},
+            "intelligence": {"file": output.name, "rows": len(latest), "archive": archived["intelligence"]},
+        },
+        "eligible_calls_deferred": phase2.deferred,
+        "ai_failures": phase2.failed,
+        "ingestion_errors": counts.get("Error", 0),
+    }
+    (paths["current"] / "Client_Intelligence_Output_Manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
     return output
 
 

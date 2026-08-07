@@ -60,9 +60,20 @@ Set `SARTHI_DB_PASSWORD` as a Windows environment variable before running
 password. Place evaluated `.xlsx`, `.xlsm`, or `.csv` files in
 `01_Input\Call_Analysis`, then run **Process evaluated call files**.
 
-The generated workbook is:
+The Daily Run first derives the in-scope population from all call-analysis files,
+maps Lead Numbers through `Leads.csv`, excludes leads without Client Codes, builds
+the call-driven Client 360, and then generates all three current reports:
 
-`D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx`
+```text
+D:\Customer Final Evaluation\04_Output\Current\RM_Action_Sheet_Current.xlsx
+D:\Customer Final Evaluation\04_Output\Current\Management_Dashboard_Current.xlsx
+D:\Customer Final Evaluation\04_Output\Current\Sarthi_Client_Intelligence_Current.xlsx
+```
+
+Each successful build also creates timestamped archive copies and an output
+manifest containing the processing Run ID, generation time, row counts, and
+completion/exception status. The RM report has exactly one primary row per Client
+Code; the detailed action records remain available on its supporting sheet.
 
 Phase 2 interprets each new or changed Sarthi 360-matched call using the relevant, privacy-minimised Client 360 facts and maintains permanent Interest, Requirement, and Issue ledgers plus one unified Action Worklist. Exact duplicates, unmatched calls, and unchanged source files never use AI. Corrected call versions deterministically rebuild current ledgers so superseded intelligence is removed. Set `OPENAI_API_KEY` for structured extraction; without it, calls are safely ingested and remain pending.
 
