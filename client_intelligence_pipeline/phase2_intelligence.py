@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1086,6 +1086,7 @@ def run_phase2(
     max_calls: int | None = None,
     client_context: dict[str, dict[str, dict[str, Any]]] | None = None,
     sarthi_360_only: bool = True,
+    checkpoint: Callable[[Phase2Counts], None] | None = None,
 ) -> Phase2Counts:
     """Interpret every eligible pending call, committing work in automatic batches.
 
@@ -1124,9 +1125,11 @@ def run_phase2(
         deferred=0,
     )
     rebuild_ledgers(con, run_id)
+    counts.deferred = eligible
+    if checkpoint is not None:
+        checkpoint(counts)
     if extractor is None:
         if not os.getenv("OPENAI_API_KEY"):
-            counts.deferred = eligible
             return counts
         if env_flag("SARTHI_AI_HYBRID_ENABLED", True):
             extractor = HybridOpenAIExtractor()
@@ -1146,6 +1149,10 @@ def run_phase2(
                 con, call, run_id, extractor, active_prompt_version,
                 client_context, counts,
             )
+        counts.deferred = max(0, eligible - (offset + len(batch)))
+        rebuild_ledgers(con, run_id)
+        if checkpoint is not None:
+            checkpoint(counts)
     rebuild_ledgers(con, run_id)
     return counts
 
