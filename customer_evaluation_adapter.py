@@ -14,6 +14,7 @@ MODES = {
     "setup": "Set up Customer Evaluation folders",
     "build_360": "Refresh Sarthi Client 360",
     "process_calls": "Process evaluated call files",
+    "rebuild_reports": "Rebuild complete reports from saved analysis - No AI",
     "full": "Daily Run - Build call-driven 360 and all reports (Recommended)",
     "profile_new_clients": "Build New Client Profiling Report",
     "call_analysis_full": "Build Call Analysis Client Report and Run Intelligence",
@@ -233,6 +234,8 @@ def build_commands(mode: str, config: dict) -> tuple[list[list[str]], Path]:
         commands = [setup, _build_360_command(python_exe, config)]
     elif mode == "process_calls":
         commands = [setup, process]
+    elif mode == "rebuild_reports":
+        commands = [setup, process + ["--skip-ai"]]
     elif mode == "full":
         commands = [setup, _build_call_analysis_command(python_exe, config)]
     elif mode == "call_analysis_full":
