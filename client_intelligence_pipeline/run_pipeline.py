@@ -1044,10 +1044,11 @@ def build_management_frames(
 def report_metadata(
     report_name: str, run_id: str, client360_path: Path | None,
     row_count: int, counts: dict[str, int], phase2: Phase2Counts,
+    report_status: str | None = None,
 ) -> pd.DataFrame:
     pending = int(phase2.deferred)
     failures = int(phase2.failed) + int(counts.get("Error", 0))
-    status = "Complete" if not pending and not failures else "Complete with exceptions"
+    status = report_status or ("Complete" if not pending and not failures else "Complete with exceptions")
     return pd.DataFrame([
         ("Report", report_name), ("Processing Run ID", run_id),
         ("Generated At", datetime.now().astimezone().isoformat(timespec="seconds")),
@@ -1099,6 +1100,7 @@ def write_excel_report(path: Path, sheets: dict[str, pd.DataFrame], add_dashboar
 def write_workbook(
     paths: dict[str, Path], con: sqlite3.Connection, client360: pd.DataFrame,
     client360_path: Path | None, counts: dict[str, int], phase2: Phase2Counts, run_id: str,
+    archive_reports: bool = True, report_status: str | None = None,
 ) -> Path:
     latest_raw = query_frame(con, "SELECT * FROM call_versions WHERE is_latest=1 ORDER BY lead_number, conversation_timestamp")
     latest = expand_calls(latest_raw.copy())
@@ -1276,7 +1278,7 @@ def write_workbook(
 
     intelligence_sheets = {
         "Report Metadata": report_metadata(
-            "Sarthi Client Intelligence", run_id, client360_path, len(latest), counts, phase2
+            "Sarthi Client Intelligence", run_id, client360_path, len(latest), counts, phase2, report_status
         ),
         "Processing Summary": summary,
         "RM Action View": rm_sheet,
@@ -1300,14 +1302,14 @@ def write_workbook(
     }
     rm_sheets = {
         "Report Metadata": report_metadata(
-            "RM Action Sheet", run_id, client360_path, len(rm_sheet), counts, phase2
+            "RM Action Sheet", run_id, client360_path, len(rm_sheet), counts, phase2, report_status
         ),
         "RM Action Sheet": rm_sheet,
         "Supporting Open Actions": actions,
     }
     management_sheets = {
         "Report Metadata": report_metadata(
-            "Management Dashboard", run_id, client360_path, len(rm_sheet), counts, phase2
+            "Management Dashboard", run_id, client360_path, len(rm_sheet), counts, phase2, report_status
         ),
         **management,
         "RM Action Summary": rm_sheet,
@@ -1316,25 +1318,26 @@ def write_workbook(
     write_excel_report(rm_output, rm_sheets)
     write_excel_report(management_output, management_sheets, add_dashboard_charts=True)
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     archived: dict[str, str] = {}
-    for key, current_path in {
-        "intelligence": output, "rm": rm_output, "management": management_output,
-    }.items():
-        archive_name = current_path.name.replace("_Current.xlsx", f"_{stamp}.xlsx")
-        archive_path = paths["archive"] / archive_name
-        shutil.copy2(current_path, archive_path)
-        archived[key] = archive_path.name
+    if archive_reports:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for key, current_path in {
+            "intelligence": output, "rm": rm_output, "management": management_output,
+        }.items():
+            archive_name = current_path.name.replace("_Current.xlsx", f"_{stamp}.xlsx")
+            archive_path = paths["archive"] / archive_name
+            shutil.copy2(current_path, archive_path)
+            archived[key] = archive_path.name
 
     manifest = {
         "processing_run_id": run_id,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "client_360_source": client360_path.name if client360_path else None,
-        "status": "Complete" if not phase2.deferred and not phase2.failed and not counts.get("Error", 0) else "Complete with exceptions",
+        "status": report_status or ("Complete" if not phase2.deferred and not phase2.failed and not counts.get("Error", 0) else "Complete with exceptions"),
         "reports": {
-            "rm": {"file": rm_output.name, "rows": len(rm_sheet), "archive": archived["rm"]},
-            "management": {"file": management_output.name, "rows": len(rm_sheet), "archive": archived["management"]},
-            "intelligence": {"file": output.name, "rows": len(latest), "archive": archived["intelligence"]},
+            "rm": {"file": rm_output.name, "rows": len(rm_sheet), "archive": archived.get("rm")},
+            "management": {"file": management_output.name, "rows": len(rm_sheet), "archive": archived.get("management")},
+            "intelligence": {"file": output.name, "rows": len(latest), "archive": archived.get("intelligence")},
         },
         "eligible_calls_deferred": phase2.deferred,
         "ai_failures": phase2.failed,
@@ -1384,11 +1387,26 @@ def main() -> int:
             refreshed_matches = refresh_client_matches(con, clients)
             counts = process_files(con, paths, clients, run_id)
             counts["RefreshedMatches"] = refreshed_matches
-            phase2 = Phase2Counts() if args.skip_ai else run_phase2(
-                con, run_id, max_calls=args.max_ai_calls,
-                client_context=client_context_lookup(client360),
-                sarthi_360_only=not args.include_unmatched_calls,
-            )
+            if args.skip_ai:
+                phase2 = Phase2Counts()
+            else:
+                def save_checkpoint(progress: Phase2Counts) -> None:
+                    refresh_action_controls(con)
+                    write_workbook(
+                        paths, con, client360, client360_path, counts, progress, run_id,
+                        archive_reports=False, report_status="Processing",
+                    )
+                    print(
+                        f"Report checkpoint saved; {progress.deferred:,} eligible AI calls remain.",
+                        flush=True,
+                    )
+
+                phase2 = run_phase2(
+                    con, run_id, max_calls=args.max_ai_calls,
+                    client_context=client_context_lookup(client360),
+                    sarthi_360_only=not args.include_unmatched_calls,
+                    checkpoint=save_checkpoint,
+                )
             refresh_action_controls(con)
             output = write_workbook(paths, con, client360, client360_path, counts, phase2, run_id)
         finally:
